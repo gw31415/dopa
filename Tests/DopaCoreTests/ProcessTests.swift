@@ -42,8 +42,8 @@ final class ProcessTests: XCTestCase {
     _ body: (URL, Process) throws -> Void, display: Bool = true, lid: Bool = false,
     delay: Bool = false, initiallyClosed: Bool = false
   ) throws {
-    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-      "dopa-process-\(UUID().uuidString)")
+    let directory = URL(fileURLWithPath: "/tmp").appendingPathComponent(
+      "dopa-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
     defer { try? FileManager.default.removeItem(at: directory) }
     try write(directory, "power", "0")

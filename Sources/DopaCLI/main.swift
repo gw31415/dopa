@@ -14,15 +14,13 @@ func run() throws {
   try Runtime.installSignals()
   if ProcessInfo.processInfo.environment["DOPA_INTERNAL_GUARDIAN"] == "1" {
     try Runtime.guardian(
-      channel: Runtime.inheritedChannel(), power: NativePower(), controls: NativeControls(),
-      options: options)
+      power: NativePower(), controls: NativeControls())
   } else {
     guard let executable = Bundle.main.executableURL else {
       throw DopaError("cannot locate executable")
     }
     try Runtime.frontend(
-      executable: executable, arguments: options.arguments,
-      environment: ["DOPA_INTERNAL_GUARDIAN": "1"])
+      executable: executable, environment: ["DOPA_INTERNAL_GUARDIAN": "1"], options: options)
   }
 }
 

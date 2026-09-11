@@ -6,31 +6,36 @@ import Foundation
 final class FilePower: Power {
   let directory: URL
   init(_ directory: URL) { self.directory = directory }
+  private func write(_ name: String, _ value: String) throws {
+    try value.write(
+      to: directory.appendingPathComponent(name), atomically: true, encoding: .utf8)
+  }
   func readDisabled() throws -> Bool {
     try String(contentsOf: directory.appendingPathComponent("power"), encoding: .utf8) == "1"
   }
   func setDisabled(_ disabled: Bool) throws {
     if disabled {
-      try "\(getsid(0)) \(getpid())".write(
-        to: directory.appendingPathComponent("guardian-session"), atomically: true, encoding: .utf8)
+      let session = "\(getsid(0)) \(getpid())"
+      try write("guardian-session", session)
+      try write("guardian-session-\(getpid())", session)
+      try write("enable-\(getpid())-\(UUID().uuidString)", "1")
+    } else {
+      try write("restore-\(getpid())-\(UUID().uuidString)", "1")
     }
     if !disabled
       && FileManager.default.fileExists(
         atPath: directory.appendingPathComponent("delay-restore").path)
     {
-      try "1".write(
-        to: directory.appendingPathComponent("restoring"), atomically: true, encoding: .utf8)
+      try write("restoring", "1")
       usleep(500_000)
     }
     if disabled
       && FileManager.default.fileExists(atPath: directory.appendingPathComponent("delay").path)
     {
-      try "1".write(
-        to: directory.appendingPathComponent("enabling"), atomically: true, encoding: .utf8)
+      try write("enabling", "1")
       usleep(500_000)
     }
-    try (disabled ? "1" : "0").write(
-      to: directory.appendingPathComponent("power"), atomically: true, encoding: .utf8)
+    try write("power", disabled ? "1" : "0")
   }
 }
 final class FileControls: Controls {
@@ -70,18 +75,21 @@ do {
   } else {
     guard let path = env["DOPA_TEST_DIRECTORY"] else { throw DopaError("missing test directory") }
     let directory = URL(fileURLWithPath: path)
-    let options = Options(
-      keepDisplayOn: env["DOPA_TEST_DISPLAY"] == "1", stopOnLidClose: env["DOPA_TEST_LID"] == "1")
     try Runtime.installSignals()
     if env["DOPA_TEST_CHILD"] == "1" {
+      try "\(getsid(0))\n\(getpid())\n".write(
+        to: directory.appendingPathComponent("guardian-session"), atomically: true, encoding: .utf8)
       try Runtime.guardian(
-        channel: Runtime.inheritedChannel(), path: directory.appendingPathComponent("state").path,
-        power: FilePower(directory), controls: FileControls(directory), options: options)
+        path: directory.appendingPathComponent("state").path,
+        power: FilePower(directory), controls: FileControls(directory))
     } else {
+      let options = Options(
+        keepDisplayOn: env["DOPA_TEST_DISPLAY"] == "1", stopOnLidClose: env["DOPA_TEST_LID"] == "1")
       var childEnv = env
       childEnv["DOPA_TEST_CHILD"] = "1"
       try Runtime.frontend(
-        executable: Bundle.main.executableURL!, arguments: [], environment: childEnv)
+        executable: Bundle.main.executableURL!, environment: childEnv, options: options,
+        path: directory.appendingPathComponent("state").path)
     }
   }
 } catch {

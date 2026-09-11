@@ -62,12 +62,13 @@ public struct Options: Equatable, Sendable {
     Usage: sudo dopa [OPTIONS]
 
       -d, --keep-display-on     Prevent idle display sleep (default: off)
-      -l, --stop-on-lid-close   Restore settings and exit when the lid closes
+      -l, --stop-on-lid-close   End this session when the lid closes
                                (default: off; also exits if already closed)
       -h, --help                Print help; no sudo required
 
     Without options, keep the system awake even with the lid closed.
-    Ctrl+C restores the original sleep setting and exits.
+    Multiple instances share one guardian. Ctrl+C ends this session.
+    The original sleep setting is restored after the last session ends.
     No battery-level cutoff is applied.
     """
 }

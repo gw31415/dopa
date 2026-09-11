@@ -15,13 +15,36 @@ final class Descriptor {
 // A stable directory and journal format provide exclusive session ownership
 // and recovery across launches.
 public final class State {
+  public struct InUse: Error, CustomStringConvertible, Equatable, Sendable {
+    public init() {}
+    public var description: String {
+      "another guardian owns state"
+    }
+  }
+
   public let path: String
-  private let directory: Descriptor
+  let directory: Descriptor
   private let lock: Descriptor
   private static let record = Data("dopa-v1\noriginal=0\n".utf8)
 
   public init(path: String = "/var/db/dopa") throws {
     self.path = path
+    let directory = try Self.prepareDirectory(path: path)
+    let lock = try Self.open(directory: directory.value, name: "lock", create: true)
+    if flock(lock.value, LOCK_EX | LOCK_NB) != 0 {
+      let failure = errno
+      if failure == EWOULDBLOCK || failure == EAGAIN {
+        throw InUse()
+      }
+      throw systemError("lock state")
+    }
+    self.directory = directory
+    self.lock = lock
+  }
+
+  // Creates and validates the state directory without taking its lifetime
+  // lock. Frontends use this while attempting to rendezvous with a guardian.
+  static func prepareDirectory(path: String) throws -> Descriptor {
     if mkdir(path, 0o700) == 0 {
       let parent = URL(fileURLWithPath: path).deletingLastPathComponent().path
       let fd = Darwin.open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
@@ -40,13 +63,10 @@ public final class State {
     guard info.st_uid == geteuid(), info.st_mode & 0o077 == 0 else {
       throw DopaError("state directory must be owned by the current user with mode 0700")
     }
-    let lock = try Self.open(directory: dir, name: "lock", create: true)
-    guard flock(lock.value, LOCK_EX | LOCK_NB) == 0 else {
-      throw DopaError("another dopa session is running (or lock is unavailable)")
-    }
-    self.directory = directory
-    self.lock = lock
+    return directory
   }
+
+  var directoryFD: Int32 { directory.value }
 
   private static func open(directory: Int32, name: String, create: Bool) throws -> Descriptor {
     let fd = dopa_openat(
