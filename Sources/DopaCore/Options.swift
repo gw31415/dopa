@@ -22,12 +22,36 @@ public struct Options: Equatable, Sendable {
   public static func parse(_ args: [String]) throws -> Action {
     var options = Options()
     var help = false
+    var endedOptions = false
     for arg in args {
+      if endedOptions {
+        throw DopaError("unknown argument: \(arg); use dopa --help")
+      }
       switch arg {
-      case "-d", "--keep-display-on": options.keepDisplayOn = true
-      case "-l", "--stop-on-lid-close": options.stopOnLidClose = true
-      case "-h", "--help": help = true
-      default: throw DopaError("unknown argument: \(arg); use dopa --help")
+      case "--":
+        endedOptions = true
+      case "--keep-display-on":
+        options.keepDisplayOn = true
+      case "--stop-on-lid-close":
+        options.stopOnLidClose = true
+      case "--help":
+        help = true
+      case let shortGroup where shortGroup.hasPrefix("-") && !shortGroup.hasPrefix("--"):
+        let flags = shortGroup.utf8.dropFirst()
+        guard !flags.isEmpty else {
+          throw DopaError("unknown argument: \(arg); use dopa --help")
+        }
+        for flag in flags {
+          switch flag {
+          case UInt8(ascii: "d"): options.keepDisplayOn = true
+          case UInt8(ascii: "l"): options.stopOnLidClose = true
+          case UInt8(ascii: "h"): help = true
+          default:
+            throw DopaError("unknown argument: \(arg); use dopa --help")
+          }
+        }
+      default:
+        throw DopaError("unknown argument: \(arg); use dopa --help")
       }
     }
     return help ? .help : .run(options)

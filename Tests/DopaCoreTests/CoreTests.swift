@@ -12,9 +12,34 @@ final class CoreTests: XCTestCase {
       }
     }
     XCTAssertEqual(
-      try Options.parse(["-d", "-l"]), .run(Options(keepDisplayOn: true, stopOnLidClose: true)))
+      try Options.parse(["-d", "-l"]),
+      .run(Options(keepDisplayOn: true, stopOnLidClose: true)))
+    XCTAssertEqual(
+      try Options.parse(["-dl"]),
+      .run(Options(keepDisplayOn: true, stopOnLidClose: true)))
+    XCTAssertEqual(
+      try Options.parse(["-ld"]),
+      .run(Options(keepDisplayOn: true, stopOnLidClose: true)))
+    XCTAssertEqual(
+      try Options.parse(["-d", "--stop-on-lid-close"]),
+      .run(Options(keepDisplayOn: true, stopOnLidClose: true)))
+    XCTAssertEqual(
+      try Options.parse(["--keep-display-on", "-l"]),
+      .run(Options(keepDisplayOn: true, stopOnLidClose: true)))
+    XCTAssertEqual(try Options.parse(["-h"]), .help)
     XCTAssertEqual(try Options.parse(["--help"]), .help)
-    XCTAssertThrowsError(try Options.parse(["--unknown"]))
+    for args in [["-dx"], ["-xd"], ["-lhx"], ["--unknown"]] {
+      XCTAssertThrowsError(try Options.parse(args))
+    }
+  }
+
+  func testOptionTerminatorRejectsTrailingArguments() throws {
+    XCTAssertEqual(try Options.parse(["--"]), .run(Options()))
+    XCTAssertEqual(
+      try Options.parse(["-d", "--"]),
+      .run(Options(keepDisplayOn: true)))
+    XCTAssertThrowsError(try Options.parse(["--", "-d"]))
+    XCTAssertThrowsError(try Options.parse(["--", "positional"]))
   }
 }
 

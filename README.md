@@ -4,7 +4,7 @@ macOS のシステムスリープと閉蓋スリープを抑制する Swift 製 
 
 ## ビルドと実行
 
-Swift 6 対応の Xcode または Command Line Tools が必要です。パッケージの deployment target は macOS 13、ビルド・API検証は手元の macOS arm64 で行っています。
+Swift 6.0 以上に対応の Xcode または Command Line Tools が必要です。外部パッケージへの依存はありません。パッケージの deployment target は macOS 13、ビルド・API検証は手元の macOS arm64 で行っています。
 
 ```sh
 swift build -c release --product dopa
@@ -19,7 +19,7 @@ sudo .build/release/dopa
 | `-h`, `--help` | ヘルプ表示。sudo不要 | — |
 
 ```sh
-sudo .build/release/dopa -d -l
+sudo .build/release/dopa -dl  # -ld または -d -l でも同じ
 ```
 
 オプションなしでは、画面消灯を許容し、閉蓋中も本体のスリープ抑制を続けます。Ctrl+C、SIGTERM、SIGHUP、SIGQUITで復元して終了します。バッテリー残量のチェック・低残量での自動解除はありません。開始・終了・エラーはstderr、ヘルプはstdoutに出します。
@@ -59,7 +59,7 @@ swift test
 swift build -c release --product dopa -Xswiftc -warnings-as-errors -Xcc -Wall -Xcc -Wextra -Xcc -Werror
 ```
 
-通常のテストはファイルで模擬した電源設定を使い、実際のシステムスリープ設定を変更しません。既定値、ヘルプ、記録と排他、復元失敗、フロントへのSIGINT/SIGTERM/SIGHUP/SIGKILL、有効化途中の強制終了、閉蓋時の終了、蓋取得失敗、画面抑制の解除を検証します。
+通常のテストはファイルで模擬した電源設定を使い、実際のシステムスリープ設定を変更しません。既定値、ヘルプ、記録と排他、復元失敗、フロントへのSIGINT/SIGTERM/SIGHUP/SIGQUIT/SIGKILL、有効化途中の終了、復元完了までの終了待ち、監視プロセスのセッション分離、閉蓋時の終了、蓋取得失敗、画面抑制の解除を検証します。
 
 実機APIの読み取りと一時的な画面assertionの作成・解除だけを確認する場合：
 

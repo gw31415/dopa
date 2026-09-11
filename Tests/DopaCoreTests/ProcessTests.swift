@@ -73,7 +73,8 @@ final class ProcessTests: XCTestCase {
 
   func testSignalsAndDeathDuringEnableRestore() throws {
     for (signal, delay) in [
-      (SIGINT, false), (SIGTERM, false), (SIGHUP, false), (SIGKILL, false), (SIGKILL, true),
+      (SIGINT, false), (SIGTERM, false), (SIGHUP, false), (SIGQUIT, false),
+      (SIGTERM, true), (SIGKILL, false), (SIGKILL, true),
     ] {
       try fixture(
         { directory, process in
@@ -92,6 +93,35 @@ final class ProcessTests: XCTestCase {
           }
           XCTAssertEqual(value(directory, "power"), "0")
         }, delay: delay)
+    }
+  }
+
+  func testTerminationWaitsForDetachedGuardianRestoration() throws {
+    try fixture { directory, process in
+      try waitFor(directory, "display", "1", process: process)
+      let identifiers = (value(directory, "guardian-session") ?? "").split(separator: " ")
+        .compactMap { Int32($0) }
+      XCTAssertEqual(identifiers.count, 2)
+      if identifiers.count == 2 {
+        XCTAssertGreaterThan(identifiers[0], 0)
+        XCTAssertEqual(identifiers[0], identifiers[1])
+        XCTAssertNotEqual(identifiers[1], process.processIdentifier)
+      }
+      try write(directory, "delay-restore", "1")
+      XCTAssertEqual(kill(process.processIdentifier, SIGTERM), 0)
+      try waitFor(directory, "restoring", "1", process: process)
+      XCTAssertTrue(process.isRunning)
+      XCTAssertEqual(value(directory, "power"), "1")
+      XCTAssertTrue(
+        FileManager.default.fileExists(
+          atPath: directory.appendingPathComponent("state/session").path))
+      try waitForExit(process)
+      XCTAssertEqual(process.terminationStatus, 0, value(directory, "stderr") ?? "")
+      XCTAssertEqual(value(directory, "power"), "0")
+      XCTAssertEqual(value(directory, "display"), "0")
+      XCTAssertFalse(
+        FileManager.default.fileExists(
+          atPath: directory.appendingPathComponent("state/session").path))
     }
   }
 
@@ -126,18 +156,21 @@ final class ProcessTests: XCTestCase {
   }
 
   func testHelpAndInvalidArgumentsNeedNoPrivileges() throws {
-    for flag in ["--help", "-h", "--invalid"] {
+    for (arguments, isHelp) in [
+      (["--help"], true), (["-h"], true), (["-dlh"], true), (["-ld", "--help"], true),
+      (["--invalid"], false), (["-dx"], false),
+    ] {
       let process = Process()
       process.executableURL = binaries.appendingPathComponent("dopa")
-      process.arguments = [flag]
+      process.arguments = arguments
       let output = Pipe()
       process.standardOutput = output
       process.standardError = FileHandle.nullDevice
       try process.run()
       let data = output.fileHandleForReading.readDataToEndOfFile()
       try waitForExit(process)
-      XCTAssertEqual(process.terminationStatus, flag == "--invalid" ? 1 : 0)
-      if flag != "--invalid" {
+      XCTAssertEqual(process.terminationStatus, isHelp ? 0 : 1)
+      if isHelp {
         let text = String(decoding: data, as: UTF8.self)
         XCTAssertTrue(text.contains("--keep-display-on"))
         XCTAssertTrue(text.contains("--stop-on-lid-close"))

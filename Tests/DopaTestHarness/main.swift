@@ -10,6 +10,18 @@ final class FilePower: Power {
     try String(contentsOf: directory.appendingPathComponent("power"), encoding: .utf8) == "1"
   }
   func setDisabled(_ disabled: Bool) throws {
+    if disabled {
+      try "\(getsid(0)) \(getpid())".write(
+        to: directory.appendingPathComponent("guardian-session"), atomically: true, encoding: .utf8)
+    }
+    if !disabled
+      && FileManager.default.fileExists(
+        atPath: directory.appendingPathComponent("delay-restore").path)
+    {
+      try "1".write(
+        to: directory.appendingPathComponent("restoring"), atomically: true, encoding: .utf8)
+      usleep(500_000)
+    }
     if disabled
       && FileManager.default.fileExists(atPath: directory.appendingPathComponent("delay").path)
     {
