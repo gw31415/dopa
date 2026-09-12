@@ -1,77 +1,110 @@
 # dopa
 
-macOS のシステムスリープと閉蓋スリープを抑制する Swift 製 CLI です。電源操作はフレームワークAPIを直接呼び、`pmset`、`caffeinate`、`ioreg`、シェルは起動しません。配布するのは `dopa` バイナリ1個です。複数の dopa を同時に起動でき、各フロントが1つの一時的な監視プロセスを共有します。起動する実行ファイルは自分自身だけです。
+macOS のシステムスリープと閉蓋スリープを抑制する CLI です。root の `dopa-daemon` が電源操作を担当し、通常の `dopa` は sudo なしで利用できます。UI は今回のスコープ外です。
 
-## ビルドと実行
+電源操作は IOKit を直接呼び、`pmset`、`caffeinate`、シェルを起動しません。サービスの登録・解除に限り、管理コマンドが `/bin/launchctl` を使用します。
 
-Swift 6.0 以上に対応の Xcode または Command Line Tools が必要です。外部パッケージへの依存はありません。パッケージの deployment target は macOS 13、ビルド・API検証は手元の macOS arm64 で行っています。
+## ビルドと導入
+
+Swift 6.0 以上の Xcode または Command Line Tools、macOS 13 以上が対象です。外部パッケージへの依存はありません。
 
 ```sh
 swift build -c release --product dopa
-.build/release/dopa --help
-sudo .build/release/dopa
+swift build -c release --product dopa-daemon
+sudo .build/release/dopa-daemon install
 ```
 
-| オプション | 動作 | デフォルト |
-| --- | --- | --- |
-| `-d`, `--keep-display-on` | 無操作による画面消灯を抑制 | OFF |
-| `-l`, `--stop-on-lid-close` | 蓋を閉じたら、この起動分を終了 | OFF |
-| `-h`, `--help` | ヘルプ表示。sudo不要 | — |
+`install` は実行元のユーザーを許可ユーザーとして記録し、root 所有のデーモンのコピーと LaunchDaemon を配置して起動します。root の直接実行など実行元が特定できない場合は `install --user USER` を使います。`dopa` CLI は自分の PATH 上など任意の場所に配置できます。
 
 ```sh
-sudo .build/release/dopa -dl  # -ld または -d -l でも同じ
+.build/release/dopa
+.build/release/dopa -d
+.build/release/dopa -l
+.build/release/dopa -dl
 ```
 
-オプションなしでは、画面消灯を許容し、閉蓋中も本体のスリープ抑制を続けます。Ctrl+C、SIGTERM、SIGHUP、SIGQUITで、その起動分を終了します。1つでも起動していれば抑制を続け、最後の終了時に元の設定へ復元します。バッテリー残量のチェック・低残量での自動解除はありません。開始・終了・エラーはstderr、ヘルプはstdoutに出します。
-
-`--keep-display-on` を指定した起動が1つでも残っていれば、画面消灯を抑制します。画面消灯時間の設定は変更しません。蓋を閉じた内蔵画面を点灯させるものではありません。`--stop-on-lid-close` は約0.3秒間隔で蓋状態を確認し、すでに閉じている場合も抑制を開始せず終了します。このオプションを指定していない起動分は継続します。蓋を開けても終了した起動分は自動再開しません。
-
-## 電源管理API
-
-| 機能 | 呼び出すAPI | 公開範囲 |
+| オプション | 動作 | 既定値 |
 | --- | --- | --- |
-| システム・閉蓋スリープ抑制 | `IOPMCopySystemPowerSettings` / `IOPMSetSystemPowerSetting` の `SleepDisabled` | **非公開SPI** |
-| 画面消灯抑制 | `IOPMAssertionCreateWithName` / `IOPMAssertionRelease` | 公開IOKit API |
-| 蓋状態の読み取り | `IOServiceMatching` / `IOServiceGetMatchingService` / `IORegistryEntryCreateCFProperty` | 公開IOKit API。ただし `AppleClamshellState` プロパティへの依存あり |
+| `-d`, `--keep-display-on` | 無操作による画面消灯も抑制 | OFF |
+| `-l`, `--stop-on-lid-close` | 蓋を閉じたら、このセッションを終了 | OFF |
+| `-h`, `--help` | ヘルプ表示 | — |
 
-**閉蓋抑制まで公開SDKだけで保証できる構成ではありません。** Apple の `pmset` が利用している同じIOKit SPIを、小さなCブリッジから呼びます。関数は手元のIOKitにexportされていますが、公開SDKヘッダーには宣言がありません。`dlsym` で存在を確認し、使えないOSでは設定を変更せずエラーにします。コマンド呼び出しへのフォールバックは行いません。
+オプションなしでは画面消灯を許容し、閉蓋中も本体のスリープ抑制を続けます。Ctrl+C、SIGTERM、SIGHUP、SIGQUIT で自分のセッションを解除します。解除の応答を待ち、確認できない場合はエラーとして終了します。
 
-SPIのABIや振る舞いは将来のmacOSで変わる可能性があります。`dlsym` はAPIの公開性や将来互換性を保証するものではありません。画面assertionはプロセスに紐づきますが、`SleepDisabled` は永続的なシステム設定なので、直接APIで書く場合も明示的な復元が必要です。
+複数の `dopa` は同じデーモンに接続します。最後のセッションが終了するまで本体の抑制を続けます。`-d` のセッションが一つでもあれば画面消灯を抑制します。画面消灯時間そのものは変更せず、閉じた内蔵画面を点灯させるものではありません。
 
-本体はSwiftで、`Sources/CDopa` のCコードはSPIの型宣言・シグナルフラグ・プロセス起動と一部POSIX関数のブリッジです。Foundationの`Process`は子をプロセスグループのリーダーにするため、監視側の`setsid`と衝突します。製品の監視プロセス起動には`posix_spawn`を使用しています。
+`-l` は既に蓋が閉じていれば開始を拒否します。開始後は約 0.3 秒間隔で確認し、閉蓋時は指定したセッションだけを終了します。蓋を開けても自動再開しません。バッテリー残量による自動解除はありません。
 
-根拠：[Apple pmset の実装](https://github.com/apple-oss-distributions/PowerManagement/blob/main/pmset/pmset.m)。コピーした実装コードはなく、APIの呼び方と所有権を参照しています。
+## 状態確認と削除
 
-## 多重起動と復元
+```sh
+# sudo 不要。セッションは作らない
+.build/release/dopa-daemon status
+.build/release/dopa-daemon status --json
 
-各フロントは Unix domain socket `/var/db/dopa/control.sock` に接続します。開いている接続を起動中のセッションとして扱うため、PIDファイルや永続的な参照カウントは不要です。フロントをSIGKILLした場合も切断を検出し、残るセッションに合わせて抑制を更新します。
+# 全セッションを終了・復元してサービスを削除
+sudo .build/release/dopa-daemon uninstall
+```
 
-`/var/db/dopa/lock` の `flock` は、設定を書き換える監視プロセスを1つに決めるために残しています。フロントの多重起動は拒否しません。ソケットのパスは異常終了後も残るため、ロックを取得した監視側だけが古いソケットを削除して作り直します。ディレクトリは0700、ソケットは0600で、接続相手のUIDも確認します。
+`status` は公開 API からデーモンの状態、セッション一覧、設定の確認値、障害を取得します。デーモンが不在でも自動起動・sudo は行いません。`dopa status` はありません。
 
-`dopa-v1` 形式の `/var/db/dopa/session` に復元情報を保存します。未完了の記録があれば監視プロセスの起動時に復旧を試みます。
+`install` の再実行はデーモンの更新です。更新・削除では進行中の全セッションを終了します。設定の復元を確認してからサービスの登録解除とファイル操作へ進み、失敗した場合は復旧に必要なファイルを保持します。削除は `dopa` CLI 自体には影響しません。
 
-監視側は設定変更前に記録をディスクへ同期し、書き込みと読み戻しを行います。最後のフロントとのソケット切断や終了要求で元の値へ戻し、復元を確認してから記録を削除します。通常の終了要求では、その起動分の解除完了を待ってフロントが終了します。画面assertionの解除とシステム設定の復元は、一方が失敗しても両方を試みます。
+`dopa-daemon run` は launchd 用の root 必須の入口です。フォアグラウンドで動作し、自分自身をバックグラウンド化しません。独自の start/stop/restart はなく、サービスのライフサイクルは launchd が管理します。OS 再起動後もサービスを起動します。
 
-元からスリープ禁止の状態、未知の設定値、壊れた記録は勝手に引き継ぎません。復元に失敗した場合は記録を保持してエラー終了します。監視側だけが強制終了した場合、残っているフロントが再接続し、新しい監視プロセスが復旧して抑制を再開します。復旧中は一時的に抑制が解除されます。全プロセスの強制終了や電源断では設定が残る可能性があり、次回の `sudo dopa` 起動時に復旧を試みます。SDK呼び出し自体が応答しなくなった場合は、安全に中断するAPIがないため、その呼び出しの完了を待ちます。
+| パス | 用途 |
+| --- | --- |
+| `/Library/LaunchDaemons/dev.dopa.daemon.plist` | LaunchDaemon 定義 |
+| `/Library/PrivilegedHelperTools/dev.dopa.daemon` | root 所有の実行ファイル |
+| `/var/run/dopa/control.sock` | 公開 Unix domain socket |
+| `/var/db/dopa/config.json` | 許可 UID |
+| `/var/db/dopa/lock` | 電源操作を行うプロセスの排他 |
+| `/var/db/dopa/session` | 未完了の復元記録 |
 
-他の閉蓋抑制ツールとの同時変更はサポートしません。Appleメニューのスリープにも影響します。
+## 公開 API
 
-## テスト
+Unix domain stream socket 上で UTF-8 の NDJSON（1 行 1 JSON オブジェクト）を使用します。ソケットへの接続だけでスリープを抑制することはありません。接続元を OS の UID で認証し、許可ユーザーと root のみ受け付けます。
+
+```json
+{"id":"1","method":"hello","params":{"apiVersion":1,"client":{"name":"example","version":"1.0"}}}
+{"id":"2","method":"status.get","params":{}}
+{"id":"3","method":"session.acquire","params":{"options":{"keepDisplayOn":false,"stopOnLidClose":false}}}
+```
+
+応答は同じ `id` と `result` または `error` を持ちます。セッションは取得した接続に所属し、切断時に解除されます。別接続から sessionId を指定しても操作できません。
+
+公開操作は `hello`、`status.get`、`status.subscribe`、`status.unsubscribe`、`session.acquire`、`session.update`、`session.release` です。管理処理向けの `admin.prepareShutdown` は root に限定します。購読は初期状態と変更後の完全な snapshot を返します。
+
+メッセージ上限は 64 KiB。フレーミング、互換性、応答・通知の順序、状態モデルとエラーの契約は [DESIGN.md](DESIGN.md) を参照してください。Swift 用の `DopaProtocol` と `DopaClient` もライブラリとして提供します。外部クライアントは別言語でも実装できます。
+
+## 復元と障害
+
+抑制前に復元記録をディスクへ同期し、設定の書き込み後に読み戻します。最後のセッション終了時は元の値 false へ戻し、確認後に記録を削除します。元からスリープ禁止、未知の設定値、壊れた記録は勝手に引き継ぎません。画面 assertion の解除とシステム設定の復元は両方を試みます。
+
+クライアントの SIGKILL も接続断として解除します。デーモン異常終了後は launchd が再起動し、受付再開前に未完了記録から復旧します。復旧できなければ degraded として状態確認を提供し、新たな抑制を拒否します。
+
+**デーモンとの接続が切れた CLI は自動で抑制を再取得しません。** 状態未確認としてエラー終了するため、状態を確認した上で再実行してください。旧 guardian 方式の自動再接続からの変更です。全プロセスの強制終了、電源断、SDK 呼び出しの停止では即時復元を保証できません。
+
+旧版の `sudo dopa` が動作中なら、そのセッションを終了してから新サービスへ切り替えてください。既存の `dopa-v1` 復元記録は引き継ぎます。他の閉蓋抑制ツールとの同時変更はサポートしません。
+
+## 電源管理 API
+
+| 機能 | API |
+| --- | --- |
+| システム・閉蓋スリープ抑制 | IOKit SPI の `IOPMCopySystemPowerSettings` / `IOPMSetSystemPowerSetting`、`SleepDisabled` |
+| 画面消灯抑制 | `IOPMAssertionCreateWithName` / `IOPMAssertionRelease` |
+| 蓋状態 | `IORegistryEntryCreateCFProperty` の `AppleClamshellState` |
+
+閉蓋抑制は公開 SDK だけでは保証できず、Apple の [pmset 実装](https://github.com/apple-oss-distributions/PowerManagement/blob/main/pmset/pmset.m) と同じ SPI を使います。`dlsym` で存在を確認し、利用できない場合に外部コマンドへフォールバックしません。SPI や蓋プロパティは将来の macOS で変更される可能性があります。Apple メニューのスリープにも影響します。
+
+## 検証
 
 ```sh
 swift test
 swift build -c release --product dopa -Xswiftc -warnings-as-errors -Xcc -Wall -Xcc -Wextra -Xcc -Werror
+swift build -c release --product dopa-daemon -Xswiftc -warnings-as-errors -Xcc -Wall -Xcc -Wextra -Xcc -Werror
 ```
 
-通常のテストはファイルで模擬した電源設定を使い、実際のシステムスリープ設定を変更しません。既定値、ヘルプ、記録と排他、復元失敗、フロントへのSIGINT/SIGTERM/SIGHUP/SIGQUIT/SIGKILL、有効化途中の終了、復元完了までの終了待ち、監視プロセスのセッション分離、閉蓋時の終了、蓋取得失敗、画面抑制の解除を検証します。さらに、同時起動での監視共有、最後の終了時のみの復元、起動ごとの画面・閉蓋オプション、監視側の強制終了後の再接続、古いソケットと記録からの復旧、ソケットの権限と不正なパスの拒否を検証します。
+テストは模擬電源と一時ディレクトリを使用します。通常のテストでシステムの SleepDisabled や LaunchDaemon 登録を変更しません。製品にはテスト用の電源切り替えオプションを含めません。
 
-実機APIの読み取りと一時的な画面assertionの作成・解除だけを確認する場合：
-
-```sh
-swift build --product DopaTestHarness
-.build/debug/DopaTestHarness --native-probe
-```
-
-`DopaTestHarness` はテスト専用で、配布する必要はありません。テスト用の設定切り替えは製品CLIに含めていません。
-
-実際の `SleepDisabled` 書き込み・閉蓋の継続・閉蓋時の解除は、[実機受入れ手順](docs/acceptance.md) で確認してください。物理的な閉蓋試験はまだ行っていません。
+実際の root サービス導入・SleepDisabled 書き込み・閉蓋継続は [実機受入れ手順](docs/acceptance.md) で別途確認してください。

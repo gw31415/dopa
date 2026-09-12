@@ -76,7 +76,14 @@ do {
     guard let path = env["DOPA_TEST_DIRECTORY"] else { throw DopaError("missing test directory") }
     let directory = URL(fileURLWithPath: path)
     try Runtime.installSignals()
-    if env["DOPA_TEST_CHILD"] == "1" {
+    if env["DOPA_TEST_DAEMON"] == "1" {
+      try DaemonService.run(
+        statePath: directory.appendingPathComponent("state").path,
+        socketPath: directory.appendingPathComponent("ipc/control.sock").path,
+        allowedUID: env["DOPA_TEST_ALLOWED_UID"].flatMap(UInt32.init) ?? geteuid(),
+        power: FilePower(directory), controls: FileControls(directory),
+        requireRoot: false)
+    } else if env["DOPA_TEST_CHILD"] == "1" {
       try "\(getsid(0))\n\(getpid())\n".write(
         to: directory.appendingPathComponent("guardian-session"), atomically: true, encoding: .utf8)
       try Runtime.guardian(

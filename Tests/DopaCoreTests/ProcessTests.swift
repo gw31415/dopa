@@ -169,7 +169,7 @@ final class ProcessTests: XCTestCase {
       try process.run()
       let data = output.fileHandleForReading.readDataToEndOfFile()
       try waitForExit(process)
-      XCTAssertEqual(process.terminationStatus, isHelp ? 0 : 1)
+      XCTAssertEqual(process.terminationStatus, isHelp ? 0 : 2)
       if isHelp {
         let text = String(decoding: data, as: UTF8.self)
         XCTAssertTrue(text.contains("--keep-display-on"))

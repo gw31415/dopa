@@ -1,25 +1,30 @@
-# macOS 実機受入れ
+# 実機受入れ
 
-自動テストは電源設定を変更しません。以下は手元の Mac を実際に操作して行う受入れです。OS バージョン・Mac 機種・CPU・電源条件を結果とともに記録してください。
+この手順は実際のサービス登録と電源設定を変更する手動検証です。通常の `swift test` とは分離します。物理的な閉蓋を含む項目は自動テストの成功だけで検証済みにしません。
 
-1. 外部ディスプレイを外し、他の閉蓋抑制ツールを終了します。`pmset -g` の `SleepDisabled` が `0` であることを確認します。
-2. `swift build -c release --product dopa` 後、`sudo ./.build/release/dopa` を起動し、開始メッセージと `pmset -g` の `SleepDisabled 1` を確認します。
-3. 別の端末で `while true; do date -u; sleep 1; done > /tmp/dopa-heartbeat.log` を実行し、蓋を約1分閉じてから開きます。ログに約1秒ごとの記録が続くことと、`pmset -g log` の該当時刻にシステムスリープがないことを照合します。通信の継続だけを判定基準にしません。
-4. AC 接続、バッテリー駆動、dopa 実行中の電源接続・切断で繰り返します。バッテリー残量による開始拒否や自動解除は行いません。
-5. Ctrl+C で終了し、`SleepDisabled 0` と `/var/db/dopa/session` の削除を確認します。通常の閉蓋スリープに戻ることを確認します。
-6. 再起動した dopa に対して SIGTERM／SIGHUP を送って同じ復元を確認します。開始メッセージのフロント PID に `sudo kill -KILL PID` を送り、監視側だけで復元することも確認します。sudo 自体の PID と取り違えないでください。
-7. dopa 実行中に別の `sudo ./.build/release/dopa` を起動し、同じ監視 PID に接続することを確認します。一方を Ctrl+C または SIGKILL で終了しても `SleepDisabled 1` が続き、最後の終了後にだけ `SleepDisabled 0` に戻ることを確認します。
-8. フロントを残して監視 PID だけを SIGKILL し、再接続メッセージと新しい監視 PID の開始メッセージを確認します。全フロントの終了後に設定が復元されることを確認します。
-9. 復旧試験では、再接続を防ぐため全フロントを SIGSTOP で停止してから、監視 PID と全フロント PID を SIGKILL で強制終了し、記録が残ることを確認します。続けて `sudo ./.build/release/dopa` を起動し、復旧メッセージと新しい開始メッセージを確認してから Ctrl+C で解除します。
+## 準備・導入
 
-## オプションの確認
+1. `swift test` と README の両方の release build を実行します。
+2. 旧版の `sudo dopa`、他の抑制ツールを終了します。`pmset -g` で SleepDisabled が 0 であることを確認します。
+3. 一般ユーザーから `sudo .build/release/dopa-daemon install` を実行します。実行元が分からない場合は `--user USER` を指定します。
+4. `launchctl print system/dev.dopa.daemon` でサービスの登録を確認します。`dopa-daemon status` と `status --json` は sudo なしで成功し、セッションなし・idle・確認値 false であることを確認します。
+5. 配置した実行ファイル・plist は root 所有で一般ユーザーが変更できず、`/var/db/dopa` は 0700 であることを確認します。別ユーザーからはソケット API を操作できないことを確認します。
 
-- `dopa --help` が sudo なしで成功し、2つのオプションの既定値が無効と表示されることを確認します。
-- `sudo ./.build/release/dopa --keep-display-on` を実行し、蓋を開けた状態で通常の画面消灯時間を超えて待っても画面が消えないことを確認します。`pmset -g assertions` で dopa の `PreventUserIdleDisplaySleep` を確認し、終了後にその assertion がなくなることを確認します。
-- `sudo ./.build/release/dopa --stop-on-lid-close` を実行して蓋を閉じ、再び開いたときには dopa が終了し、`SleepDisabled 0` と記録の削除を確認できることを確認します。
-- `sudo ./.build/release/dopa -d -l` でも閉蓋時に復元・終了し、画面消灯抑制の assertion が残らないことを確認します。
-- オプションなしでは、画面消灯を許容し、閉蓋後も処理が続くことを時刻ログで確認します。
-- オプションなしの起動と `-d` の起動を併用し、`-d` 側の終了後は画面 assertion だけが消え、システムの抑制は続くことを確認します。
-- オプションなしの起動と `-l` の起動を併用し、閉蓋で `-l` 側だけが終了し、残る起動分の抑制が続くことを確認します。
+## セッション
 
-復元失敗時はエラーを保存し、同じバイナリを再実行して復旧してください。手動で `sudo pmset disablesleep 0` を実行するのは、dopa と他の抑制ツールが終了し、進行中の pmset がないことを確認できた場合の最終手段です。
+1. sudo なしで `.build/release/dopa` を起動し、status と `pmset -g` の SleepDisabled 1 を照合します。
+2. 別端末でも dopa を起動し、2 セッションを確認します。一方を Ctrl+C、もう一方を SIGTERM で終了し、最後の終了後だけ SleepDisabled 0 と復元記録の削除を確認します。
+3. `dopa -d` と通常の dopa を併用します。`pmset -g assertions` で表示 assertion を確認し、`-d` 側の終了で表示 assertion だけが解除されることを確認します。
+4. dopa の PID に SIGKILL を送り、接続断による解除を確認します。
+5. 外部ディスプレイを外し、dopa と秒ごとの時刻を記録する別プロセスを動かして蓋を約 1 分閉じます。開いた後に記録の連続性と `pmset -g log` を照合します。通信の継続だけで判断しません。
+6. `dopa -l` と通常の dopa を併用し、閉蓋で `-l` 側だけが終了することを確認します。`dopa -dl` でも表示 assertion の解除を確認します。
+
+## 障害・管理
+
+1. dopa 稼働中にデーモンへ SIGKILL を送ります。launchd が再起動し、記録を復旧することを確認します。旧 CLI は異常終了し、自動再取得しないため、復旧後はセッションなしとなります。
+2. 再起動後に status と新しい dopa が利用できることを確認します。
+3. セッション稼働中に `sudo dopa-daemon install` を再実行し、既存セッションの終了・復元・更新後の稼働を確認します。
+4. `sudo dopa-daemon uninstall` を実行し、復元後にサービスと管理ファイルが削除され、CLI 自体は残ることを確認します。status は接続不能で非ゼロ終了します。
+5. 復元失敗・配置失敗は模擬テストで確認します。実機で復元に失敗した場合は管理ファイルや復旧記録を手動削除せず、エラーを保存して復旧します。
+
+手動の `sudo pmset disablesleep 0` は、dopa と他ツールが動いていないことを確認できた場合の最終的な復旧手段です。
