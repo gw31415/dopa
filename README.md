@@ -16,6 +16,8 @@ sudo .build/release/dopa-daemon install
 
 `install` は実行元のユーザーを許可ユーザーとして記録し、root 所有のデーモンのコピーと LaunchDaemon を配置して起動します。root の直接実行など実行元が特定できない場合は `install --user USER` を使います。`dopa` CLI は自分の PATH 上など任意の場所に配置できます。
 
+v0.2.0 で `managed directory is writable by others: /private/var/run` が出る場合は、v0.2.1 以降の `dopa-daemon` で install を再実行してください。macOS 標準ディレクトリの検証を修正しており、`/var/run` の権限を変更する必要はありません。
+
 ```sh
 .build/release/dopa
 .build/release/dopa -d

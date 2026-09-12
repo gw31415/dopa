@@ -1,5 +1,5 @@
 import Darwin
-import DopaManagement
+@testable import DopaManagement
 import DopaProtocol
 import Foundation
 import XCTest
@@ -57,6 +57,57 @@ final class ManagementTests: XCTestCase {
       shutdownRequester: { _ in shutdownCount?.value += 1 },
       readinessChecker: readiness,
       requireRoot: false)
+  }
+
+  func testSystemRuntimeAncestorAcceptsOnlyStandardMacOSMetadata() throws {
+    var info = stat()
+    XCTAssertEqual(lstat("/private/var/run", &info), 0)
+    // Exercise real host metadata: temporary fixtures normally have 0755
+    // parents and did not reveal the standard root:daemon 0775 ancestor.
+    if info.st_uid == 0 && info.st_gid == 1 && info.st_mode & 0o7777 == 0o775 {
+      XCTAssertTrue(DaemonManager.isSystemRuntimeAncestor("/private/var/run", info: info, isFinal: false))
+    }
+    info.st_mode = mode_t(S_IFDIR) | 0o775
+    info.st_uid = 0
+    info.st_gid = 1
+    XCTAssertTrue(DaemonManager.isSystemRuntimeAncestor("/private/var/run", info: info, isFinal: false))
+    XCTAssertFalse(DaemonManager.isSystemRuntimeAncestor("/private/var/run", info: info, isFinal: true))
+    XCTAssertFalse(DaemonManager.isSystemRuntimeAncestor("/private/var/run/dopa", info: info, isFinal: false))
+    XCTAssertFalse(DaemonManager.isSystemRuntimeAncestor("/tmp/run", info: info, isFinal: false))
+    info.st_gid = 20
+    XCTAssertFalse(DaemonManager.isSystemRuntimeAncestor("/private/var/run", info: info, isFinal: false))
+    info.st_gid = 1
+    info.st_uid = 501
+    XCTAssertFalse(DaemonManager.isSystemRuntimeAncestor("/private/var/run", info: info, isFinal: false))
+    info.st_uid = 0
+    info.st_mode = mode_t(S_IFDIR) | 0o777
+    XCTAssertFalse(DaemonManager.isSystemRuntimeAncestor("/private/var/run", info: info, isFinal: false))
+  }
+
+  func testWritableManagedDirectoryIsStillRejected() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let directory = fixture.root.appendingPathComponent("run")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+    XCTAssertEqual(chmod(directory.path, 0o775), 0)
+    let installer = manager(fixture, runner: FakeRunner())
+    XCTAssertThrowsError(try installer.ensureDirectory(directory.path, mode: 0o755))
+    var info = stat()
+    XCTAssertEqual(lstat(directory.path, &info), 0)
+    XCTAssertEqual(info.st_mode & 0o777, 0o775)
+  }
+
+  func testSharedSystemHelperDirectoryIsNotChmodded() throws {
+    guard geteuid() != 0 else { throw XCTSkip("host directory check is read-only as non-root") }
+    let path = "/Library/PrivilegedHelperTools"
+    var before = stat()
+    guard lstat(path, &before) == 0 else { throw XCTSkip("shared helper directory absent") }
+    try DaemonManager().ensureDirectory(path, mode: 0o755)
+    var after = stat()
+    XCTAssertEqual(lstat(path, &after), 0)
+    XCTAssertEqual(before.st_mode, after.st_mode)
+    XCTAssertEqual(before.st_uid, after.st_uid)
+    XCTAssertEqual(before.st_gid, after.st_gid)
   }
 
   func testInstallUpdatesAndUninstallPreserveUserAndSecureFiles() throws {

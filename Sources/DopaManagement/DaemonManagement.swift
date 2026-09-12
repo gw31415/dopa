@@ -613,7 +613,7 @@ public final class DaemonManager: @unchecked Sendable {
     try ensureDirectory(parent, mode: mode)
   }
 
-  private func ensureDirectory(_ path: String, mode: mode_t) throws {
+  func ensureDirectory(_ path: String, mode: mode_t) throws {
     let path = normalizeKnownSystemAlias(path)
     guard path.hasPrefix("/"), path != "/" else {
       if path == "/" { return }
@@ -647,7 +647,8 @@ public final class DaemonManager: @unchecked Sendable {
       // Existing system ancestors (/var, /Library, /tmp) may be root-owned;
       // newly created and final managed directories must belong to the target
       // owner. All existing ancestors must still be non-writable by others,
-      // except the conventional sticky /tmp-style directory.
+      // except conventional sticky directories and macOS's root:daemon
+      // runtime ancestor. Neither exception applies to our own directory.
       let isFinal = index == components.count - 1
       if isFinal {
         guard info.st_uid == layout.expectedOwnerUID else {
@@ -656,7 +657,9 @@ public final class DaemonManager: @unchecked Sendable {
         guard info.st_mode & 0o022 == 0 else {
           throw DaemonManagementError.unsafePath("managed directory is writable by others: \(current)")
         }
-        if info.st_mode & 0o7777 != mode {
+        let sharedSystemDirectory = current == "/Library/LaunchDaemons"
+          || current == "/Library/PrivilegedHelperTools"
+        if !sharedSystemDirectory && info.st_mode & 0o7777 != mode {
           guard chmod(current, mode) == 0 else {
             throw DaemonManagementError.unsafePath("cannot set managed directory mode: \(current)")
           }
@@ -668,10 +671,21 @@ public final class DaemonManager: @unchecked Sendable {
       }
       let writableByOthers = info.st_mode & 0o022 != 0
       let sticky = info.st_mode & S_ISVTX != 0
-      guard !writableByOthers || sticky else {
+      let systemRuntimeAncestor = Self.isSystemRuntimeAncestor(current, info: info, isFinal: isFinal)
+      guard !writableByOthers || sticky || systemRuntimeAncestor else {
         throw DaemonManagementError.unsafePath("managed directory is writable by others: \(current)")
       }
     }
+  }
+
+  // /private/var/run is shipped root:daemon 0775 on macOS. Trust only
+  // that exact system ancestor, never arbitrary group-writable directories
+  // or the dopa directory itself. The daemon system group has GID 1.
+  static func isSystemRuntimeAncestor(_ path: String, info: stat, isFinal: Bool) -> Bool {
+    !isFinal && path == "/private/var/run"
+      && info.st_mode & S_IFMT == S_IFDIR
+      && info.st_uid == 0 && info.st_gid == 1
+      && info.st_mode & 0o7777 == 0o775
   }
 
   private func normalizeKnownSystemAlias(_ path: String) -> String {
