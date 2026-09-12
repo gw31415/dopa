@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#eeeff1">
+  <title>dopa — シンプルなUI</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <main>
+    <section class="panel" aria-label="dopa 操作パネル">
+      <header class="panel-header"><h1>dopa</h1><span class="status" id="status" role="status" aria-atomic="true" data-state="inactive"><span class="status-dot" aria-hidden="true"></span><span id="status-label">オフ</span></span></header>
+      <div class="tabs" role="tablist" aria-label="操作範囲"><button id="tab-own" role="tab" aria-selected="true" aria-controls="own-panel">このアプリ</button><button id="tab-global" role="tab" aria-selected="false" aria-controls="global-panel" tabindex="-1">全体管理 <span id="session-count">1</span></button></div>
+      <div class="tab-panels">
+      <div id="own-panel" role="tabpanel" aria-labelledby="tab-own">
+        <form id="controls" novalidate>
+          <div class="settings-group" role="group" aria-label="時間管理">
+            <div class="time-rows">
+              <div class="setting-row"><label for="duration" id="duration-label">時間</label><input id="duration" type="text" value="01:00:00" placeholder="—" autocomplete="off" spellcheck="false" title="HH:MM:SS"></div>
+              <div class="setting-row"><div class="time-label"><label for="end-time">終了時刻</label><span id="end-day">今日</span></div><input id="end-time" type="time" step="1"></div>
+            </div>
+            <div class="time-options">
+              <label class="unlimited-option"><input type="checkbox" id="unlimited">無制限</label>
+              <div class="duration-increments" role="group" aria-label="時間を追加"><button type="button" data-add-seconds="900" aria-label="15分追加">＋15分</button><button type="button" data-add-seconds="1800" aria-label="30分追加">＋30分</button><button type="button" data-add-seconds="3600" aria-label="1時間追加">＋1時間</button></div>
+            </div>
+            <div class="confirm-row" id="edit-actions"><button class="power-button" type="button" id="power-button">開始</button><button type="button" id="cancel-edit" title="キャンセル" hidden>キャンセル</button><button type="submit" class="confirm-button" id="confirm-edit" hidden>適用</button></div>
+          </div>
+          <div class="settings-group" role="group" aria-label="動作設定">
+            <div class="setting-row"><label id="display-label" for="display-switch">ディスプレイをスリープさせない</label><button type="button" class="switch" id="display-switch" role="switch" aria-labelledby="display-label" aria-checked="false"><span></span></button></div>
+            <div class="setting-row"><label id="lid-label" for="lid-switch">ディスプレイを閉じたら停止</label><button type="button" class="switch" id="lid-switch" role="switch" aria-labelledby="lid-label" aria-checked="false"><span></span></button></div>
+          </div>
+        </form>
+      </div>
+      <div id="global-panel" role="tabpanel" aria-labelledby="tab-global" hidden>
+        <div class="global-content">
+        <div class="settings-group" id="sessions" role="region" aria-label="スリープ防止の一覧" tabindex="0"></div>
+        <button class="primary-button stop" id="stop-all">すべて停止</button>
+        </div>
+      </div>
+      </div>
+    </section>
+    <p class="preview-note">デザイン検討用のデモ <span>·</span> 電源操作なし</p>
+  </main>
+  <dialog id="stop-dialog" aria-labelledby="stop-title" aria-describedby="stop-description stop-targets"><h2 id="stop-title">スリープ防止を停止しますか？</h2><p id="stop-description"></p><p id="stop-targets"></p><div class="dialog-actions"><button id="cancel-stop">キャンセル</button><button id="confirm-stop" class="confirm-button">スリープ防止を停止</button></div></dialog>
+  <div id="validation-popover" popover="manual" role="dialog" aria-modal="false" aria-labelledby="validation-title"><h2 id="validation-title"></h2><p id="edit-error" role="alert"></p><button type="button" id="dismiss-validation" aria-label="エラーメッセージを閉じる">×</button></div>
+</body>
+</html>
