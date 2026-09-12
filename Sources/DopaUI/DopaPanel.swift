@@ -17,7 +17,7 @@ struct DopaPanel: View {
   var body: some View {
     VStack(spacing: 16) {
       HStack(alignment: .firstTextBaseline) {
-        Text("dopa").font(.title2.bold())
+        Text("Dopa").font(.title2.bold())
         Spacer()
         Label("消灯抑制", systemImage: "display")
           .font(.callout)
@@ -384,7 +384,7 @@ private struct SessionsView: View {
         ForEach(model.sessions) { session in
           HStack {
             VStack(alignment: .leading, spacing: 4) {
-              Text(session.id == model.ownSessionID ? "dopa" : session.clientName)
+              Text(session.id == model.ownSessionID ? "Dopa" : session.clientName)
                 .lineLimit(1).truncationMode(.middle)
               Text(session.id == model.ownSessionID ? "このアプリ" : "PID \(String(session.peerPID))")
                 .font(.caption).foregroundStyle(.secondary)
@@ -442,11 +442,11 @@ private struct SessionsView: View {
 
   private var confirmationMessage: String {
     let targets = confirmation.map { session in
-      session.id == model.ownSessionID ? "dopa（このアプリ）" : "\(session.clientName)（PID \(String(session.peerPID))）"
+      session.id == model.ownSessionID ? "Dopa（このアプリ）" : "\(session.clientName)（PID \(String(session.peerPID))）"
     }.joined(separator: "\n")
     let ids = Set(confirmation.map(\.id))
     let remains = model.sessions.contains { !ids.contains($0.id) }
-    let result = remains ? "ほかの使用元のスリープ防止は継続します。" : "対象の停止後、dopaによるスリープ防止が解除されます。"
+    let result = remains ? "ほかの使用元のスリープ防止は継続します。" : "対象の停止後、Dopaによるスリープ防止が解除されます。"
     return "\(targets)\n\n\(result)"
   }
   private func stopConfirmed() {

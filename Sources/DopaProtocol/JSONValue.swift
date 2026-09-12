@@ -5,7 +5,7 @@ public enum DopaProtocol {
   public static let clientVersion = "0.2.1"
 }
 
-/// The JSON value types accepted by the dopa wire protocol.
+/// The JSON value types accepted by the Dopa wire protocol.
 public enum JSONValue: Codable, Equatable, Sendable {
   case object([String: JSONValue])
   case array([JSONValue])

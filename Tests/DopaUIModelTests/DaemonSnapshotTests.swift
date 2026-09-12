@@ -10,7 +10,7 @@ final class DaemonSnapshotTests: XCTestCase {
       instanceID: "daemon-a",
       revision: "42",
       phase: "active",
-      sessions: [sessionJSON(id: "ui", clientName: "dopa UI", pid: 2187)],
+      sessions: [sessionJSON(id: "ui", clientName: "Dopa UI", pid: 2187)],
       systemSleepDisabled: true,
       keepDisplayOn: false,
       extras: [
@@ -27,7 +27,7 @@ final class DaemonSnapshotTests: XCTestCase {
     XCTAssertEqual(snapshot.revision, "42")
     XCTAssertEqual(snapshot.phase, "active")
     XCTAssertEqual(snapshot.sessions.map(\.id), ["ui"])
-    XCTAssertEqual(snapshot.sessions[0].clientName, "dopa UI")
+    XCTAssertEqual(snapshot.sessions[0].clientName, "Dopa UI")
     XCTAssertEqual(snapshot.sessions[0].peerPID, 2187)
     XCTAssertEqual(snapshot.systemSleepDisabled, true)
     XCTAssertEqual(snapshot.keepDisplayOn, false)

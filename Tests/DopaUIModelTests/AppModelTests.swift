@@ -13,7 +13,7 @@ final class AppModelTests: XCTestCase {
     let idle = modelSnapshotJSON(phase: "idle")
     let running = modelSnapshotJSON(
       revision: "3", phase: "active",
-      sessions: [modelSessionJSON(id: "own", clientName: "dopa UI", pid: 2187)],
+      sessions: [modelSessionJSON(id: "own", clientName: "Dopa UI", pid: 2187)],
       systemSleepDisabled: true)
     let transport = MockDaemonTransport(
       handshake: DaemonHandshake(capabilities: [], snapshot: try DaemonSnapshot(idle)),
@@ -42,7 +42,7 @@ final class AppModelTests: XCTestCase {
     let idle = modelSnapshotJSON(phase: "idle")
     let running = modelSnapshotJSON(
       revision: "3", phase: "active",
-      sessions: [modelSessionJSON(id: "own", clientName: "dopa UI", pid: 2187)],
+      sessions: [modelSessionJSON(id: "own", clientName: "Dopa UI", pid: 2187)],
       systemSleepDisabled: true)
     let transport = MockDaemonTransport(
       handshake: DaemonHandshake(capabilities: [], snapshot: try DaemonSnapshot(idle)),
@@ -153,7 +153,7 @@ final class AppModelTests: XCTestCase {
     let running = modelSnapshotJSON(
       revision: "3",
       phase: "active",
-      sessions: [modelSessionJSON(id: "own", clientName: "dopa UI", pid: 2187)],
+      sessions: [modelSessionJSON(id: "own", clientName: "Dopa UI", pid: 2187)],
       systemSleepDisabled: true,
       keepDisplayOn: false
     )
@@ -187,7 +187,7 @@ final class AppModelTests: XCTestCase {
     let running = modelSnapshotJSON(
       revision: "3",
       phase: "active",
-      sessions: [modelSessionJSON(id: "own", clientName: "dopa UI", pid: 2187)],
+      sessions: [modelSessionJSON(id: "own", clientName: "Dopa UI", pid: 2187)],
       systemSleepDisabled: true,
       keepDisplayOn: false
     )
@@ -226,7 +226,7 @@ final class AppModelTests: XCTestCase {
       revision: "3",
       phase: "active",
       sessions: [
-        modelSessionJSON(id: "own", clientName: "dopa UI", pid: 2187),
+        modelSessionJSON(id: "own", clientName: "Dopa UI", pid: 2187),
         modelSessionJSON(id: "cli", clientName: "dopa CLI", pid: 4281),
       ],
       systemSleepDisabled: true,
@@ -271,7 +271,7 @@ final class AppModelTests: XCTestCase {
     let running = modelSnapshotJSON(
       revision: "3",
       phase: "active",
-      sessions: [modelSessionJSON(id: "own", clientName: "dopa UI", pid: 2187)],
+      sessions: [modelSessionJSON(id: "own", clientName: "Dopa UI", pid: 2187)],
       systemSleepDisabled: true,
       keepDisplayOn: false
     )
@@ -317,7 +317,7 @@ final class AppModelTests: XCTestCase {
     let running = modelSnapshotJSON(
       revision: "3",
       phase: "active",
-      sessions: [modelSessionJSON(id: "own", clientName: "dopa UI", pid: 2187)],
+      sessions: [modelSessionJSON(id: "own", clientName: "Dopa UI", pid: 2187)],
       systemSleepDisabled: true,
       keepDisplayOn: false
     )
@@ -395,7 +395,7 @@ final class AppModelTests: XCTestCase {
     let idle = modelSnapshotJSON(phase: "idle")
     let running = modelSnapshotJSON(
       revision: "3", phase: "active",
-      sessions: [modelSessionJSON(id: "own", clientName: "dopa UI", pid: 2187)],
+      sessions: [modelSessionJSON(id: "own", clientName: "Dopa UI", pid: 2187)],
       systemSleepDisabled: true, keepDisplayOn: false)
     let transport = MockDaemonTransport(
       handshake: DaemonHandshake(capabilities: [], snapshot: try DaemonSnapshot(idle)),

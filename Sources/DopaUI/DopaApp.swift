@@ -10,7 +10,7 @@ enum DopaEntryPoint {
     if #available(macOS 26.0, *) { DopaApp.main() }
     else {
       let alert = NSAlert()
-      alert.messageText = "dopa UIにはmacOS 26以降が必要です。"
+      alert.messageText = "Dopa UIにはmacOS 26以降が必要です。"
       alert.runModal()
     }
   }
@@ -41,10 +41,10 @@ struct DopaApp: App {
   }
 
   var body: some Scene {
-    // The status item and its popover are owned by DopaAppDelegate. A
-    // Settings scene keeps SwiftUI's App lifecycle without creating a second
-    // window or a MenuBarExtra that would consume both mouse buttons.
+    // The status item and its popover are owned by DopaAppDelegate. Suppress
+    // the otherwise empty Settings scene when the application launches.
     Settings { EmptyView() }
+      .defaultLaunchBehavior(.suppressed)
   }
 }
 
@@ -60,7 +60,7 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
     let menu = NSMenu()
     menu.autoenablesItems = false
     let item = menu.addItem(
-      withTitle: "dopaを終了",
+      withTitle: "Dopaを終了",
       action: #selector(terminateFromMenu(_:)),
       keyEquivalent: "q"
     )
@@ -125,8 +125,8 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
     button.title = ""
     button.image = NSImage(systemSymbolName: model.statusSymbol, accessibilityDescription: model.status)
     button.image?.isTemplate = true
-    button.toolTip = "dopa — \(model.status)"
-    button.setAccessibilityLabel("dopa — \(model.status)")
+    button.toolTip = "Dopa — \(model.status)"
+    button.setAccessibilityLabel("Dopa — \(model.status)")
   }
 
   private func observeStatus(of model: AppModel) {

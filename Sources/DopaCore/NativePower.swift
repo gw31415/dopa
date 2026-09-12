@@ -40,7 +40,7 @@ public final class NativeControls: Controls {
     var assertion: IOPMAssertionID = 0
     let status = IOPMAssertionCreateWithName(
       kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString,
-      IOPMAssertionLevel(kIOPMAssertionLevelOn), "dopa" as CFString, &assertion)
+      IOPMAssertionLevel(kIOPMAssertionLevelOn), "Dopa" as CFString, &assertion)
     guard status == kIOReturnSuccess else {
       throw DopaError("cannot prevent display sleep (IOKit \(status))")
     }

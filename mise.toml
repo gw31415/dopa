@@ -1,0 +1,4 @@
+[tools]
+swift = "6.3.3"
+node = "26.8.1"
+python = "3.14.7"

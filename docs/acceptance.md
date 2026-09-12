@@ -1,10 +1,10 @@
 # 実機受入れ
 
-サービス登録と電源設定を扱う項目は実機を変更する手動検証です。通常の `swift test` とは分離します。物理的な閉蓋を含む項目は自動テストの成功だけで検証済みにしません。メニューバーUIの確認には、下記の模擬電源を使う検証用アプリを利用します。
+サービス登録と電源設定を扱う項目は実機を変更する手動検証です。通常の `make test` とは分離します。物理的な閉蓋を含む項目は自動テストの成功だけで検証済みにしません。メニューバーUIの確認には、下記の模擬電源を使う検証用アプリを利用します。
 
 ## 準備・導入
 
-1. `swift test` と README の両方の release build を実行します。
+1. `make check` を実行し、全テストと両方の release build が成功することを確認します。
 2. 旧版の `sudo dopa`、他の抑制ツールを終了します。`pmset -g` で SleepDisabled が 0 であることを確認します。
 3. 一般ユーザーから `sudo .build/release/dopa-daemon install` を実行します。実行元が分からない場合は `--user USER` を指定します。
 4. `launchctl print system/dev.dopa.daemon` でサービスの登録を確認します。`dopa-daemon status` と `status --json` は sudo なしで成功し、セッションなし・idle・確認値 false であることを確認します。

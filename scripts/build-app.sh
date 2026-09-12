@@ -12,7 +12,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/build-app.sh [--ui-test-fixture]
 
-Build and bundle the dopa menu bar app with its CLI and daemon helpers.
+Build and bundle the Dopa menu bar app with its CLI and daemon helpers.
 The fixture option uses an isolated SwiftPM scratch path and emits the UI-only
 Dopa-Test.app instead of Dopa.app. Building does not install the daemon.
 EOF
@@ -95,7 +95,7 @@ cp "${INFO_PLIST_SOURCE}" "${INFO_PLIST_PATH}"
 
 if (( fixture )); then
   plutil -replace CFBundleIdentifier -string "${BUNDLE_IDENTIFIER}" "${INFO_PLIST_PATH}"
-  plutil -replace CFBundleDisplayName -string "dopa (UI test)" "${INFO_PLIST_PATH}"
+  plutil -replace CFBundleDisplayName -string "Dopa (UI test)" "${INFO_PLIST_PATH}"
 fi
 
 ICON_NAME="${ICON_SOURCE##*/}"
@@ -129,6 +129,10 @@ fi
 rm -f "${ICON_PARTIAL_INFO}"
 
 plutil -lint "${INFO_PLIST_PATH}" >/dev/null
+[[ "$(plutil -extract CFBundleDisplayName raw -o - "${INFO_PLIST_PATH}")" == Dopa ]] \
+  || die "CFBundleDisplayName must be Dopa"
+[[ "$(plutil -extract CFBundleName raw -o - "${INFO_PLIST_PATH}")" == Dopa ]] \
+  || die "CFBundleName must be Dopa"
 [[ "$(plutil -extract CFBundleExecutable raw -o - "${INFO_PLIST_PATH}")" == dopa-ui ]] \
   || die "CFBundleExecutable must be dopa-ui"
 [[ "$(plutil -extract CFBundleIdentifier raw -o - "${INFO_PLIST_PATH}")" == "${BUNDLE_IDENTIFIER}" ]] \

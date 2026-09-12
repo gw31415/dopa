@@ -24,7 +24,7 @@ private struct DaemonCLIError: Error, CustomStringConvertible {
 }
 
 private let daemonHelp = """
-  dopa-daemon — privileged dopa service
+  dopa-daemon — privileged Dopa service
 
   Usage:
     sudo dopa-daemon install [--user NAME|UID]

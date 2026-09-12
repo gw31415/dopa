@@ -158,11 +158,11 @@ public struct DaemonConfiguration: Codable, Equatable, Sendable {
       let version = Self.strictInteger(object["version"]),
       let uid = Self.strictInteger(object["allowedUID"])
     else {
-      throw DaemonManagementError.invalidConfiguration("invalid dopa daemon configuration")
+      throw DaemonManagementError.invalidConfiguration("invalid Dopa daemon configuration")
     }
     guard version == Self.currentVersion, uid >= 0, UInt64(uid) <= UInt64(uid_t.max) else {
       throw DaemonManagementError.invalidConfiguration(
-        "unsupported or invalid dopa daemon configuration")
+        "unsupported or invalid Dopa daemon configuration")
     }
     self.init(allowedUID: uid_t(uid), version: Int(version))
   }
@@ -170,7 +170,7 @@ public struct DaemonConfiguration: Codable, Equatable, Sendable {
   public func data() throws -> Data {
     let object: [String: Any] = ["version": version, "allowedUID": Int64(allowedUID)]
     guard JSONSerialization.isValidJSONObject(object) else {
-      throw DaemonManagementError.invalidConfiguration("cannot encode dopa daemon configuration")
+      throw DaemonManagementError.invalidConfiguration("cannot encode Dopa daemon configuration")
     }
     return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
   }
@@ -447,7 +447,7 @@ public final class DaemonManager: @unchecked Sendable {
     guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
       if errno == EWOULDBLOCK || errno == EAGAIN {
         throw DaemonManagementError.serviceUnavailable(
-          "an existing dopa session still owns the state; stop it before installation")
+          "an existing Dopa session still owns the state; stop it before installation")
       }
       throw DaemonManagementError.commandFailed(
         "check state lock: \(String(cString: strerror(errno)))")

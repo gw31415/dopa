@@ -11,7 +11,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/run-ui-fixture.sh [--help]
 
-Build and launch the isolated dopa UI fixture with a mock-power daemon.
+Build and launch the isolated Dopa UI fixture with a mock-power daemon.
 The fixture uses a temporary directory under /tmp and cleans up both
 fixture processes when the UI exits.
 EOF

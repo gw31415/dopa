@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDisplayName</key>
-	<string>dopa</string>
+	<string>Dopa</string>
 	<key>CFBundleExecutable</key>
 	<string>dopa-ui</string>
 	<key>CFBundleIdentifier</key>
@@ -11,7 +11,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>dopa</string>
+	<string>Dopa</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

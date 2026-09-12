@@ -37,24 +37,24 @@ public enum DopaClientError: Error, Equatable, Sendable, CustomStringConvertible
     case .invalidSocketPath:
       return "invalid Unix socket path"
     case .socketPathMissing:
-      return "dopa daemon socket is unavailable"
+      return "Dopa daemon socket is unavailable"
     case .unsafeSocketPath(let message):
-      return "unsafe dopa daemon socket: \(message)"
+      return "unsafe Dopa daemon socket: \(message)"
     case .socketFailure(let message):
-      return "dopa daemon socket: \(message)"
+      return "Dopa daemon socket: \(message)"
     case .invalidTimeout:
       return "timeout must be a finite, non-negative duration"
     case .timedOut(let operation):
-      return "timed out waiting for dopa daemon (\(operation))"
+      return "timed out waiting for Dopa daemon (\(operation))"
     case .connectionClosed:
-      return "dopa daemon connection closed"
+      return "Dopa daemon connection closed"
     case .protocolViolation(let message):
-      return "dopa daemon protocol error: \(message)"
+      return "Dopa daemon protocol error: \(message)"
     }
   }
 }
 
-/// A synchronous, serialized client for dopa-daemon's NDJSON API.
+/// A synchronous, serialized client for Dopa's `dopa-daemon` NDJSON API.
 ///
 /// The connection owns any session acquired through it. Closing the socket,
 /// including an explicit timeout, lets the daemon release that session.

@@ -95,7 +95,7 @@ private actor PositionTransport: DaemonTransport {
   func close() async {}
   private var status: JSONValue {
     let session: JSONValue = .object([
-      "id": .string("position-own"), "clientName": .string("dopa UI"), "peerPID": .number(123),
+      "id": .string("position-own"), "clientName": .string("Dopa UI"), "peerPID": .number(123),
       "options": .object(["keepDisplayOn": .bool(false), "stopOnLidClose": .bool(false)]),
     ])
     return .object([

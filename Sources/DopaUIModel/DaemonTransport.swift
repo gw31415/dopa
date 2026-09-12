@@ -47,7 +47,7 @@ public final class SocketTransport: DaemonTransport, @unchecked Sendable {
     try await perform { owner in
       owner.connection?.close()
       owner.connection = nil
-      let connection = try DopaConnection(path: owner.path, requireRoot: owner.requireRoot, clientName: "dopa UI")
+      let connection = try DopaConnection(path: owner.path, requireRoot: owner.requireRoot, clientName: "Dopa UI")
       do {
         let snapshot = try DaemonSnapshot(connection.request(method: "status.subscribe"))
         owner.connection = connection

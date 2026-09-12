@@ -72,7 +72,7 @@ function renderTime(now) {
 }
 function renderSessions() {
   const rows = [];
-  if (schedule.running) rows.push({id: 'own', name: 'dopa', subtitle: 'このアプリ'});
+  if (schedule.running) rows.push({id: 'own', name: 'Dopa', subtitle: 'このアプリ'});
   rows.push(...cliSessions.map(session => ({
     id: session.id,
     name: 'dopa CLI',
@@ -192,7 +192,7 @@ function openStopDialog(targets, all = false) {
   if (all) {
     const cliTargets = cliTargetIds(targets);
     const source = cliTargets.length ? (targets.includes('own') ? 'CLIから開始したものも停止します。' : 'CLIのスリープ防止を停止します。') : 'このアプリのスリープ防止を停止します。';
-    $('#stop-description').textContent = `${source}dopaはMacのスリープを防止しなくなります。`;
+    $('#stop-description').textContent = `${source}DopaはMacのスリープを防止しなくなります。`;
   } else {
     const remainingCliCount = cliSessions.length - cliTargetIds(targets).length;
     const remaining = [];
@@ -200,10 +200,10 @@ function openStopDialog(targets, all = false) {
     if (schedule.running) remaining.push('このアプリ');
     $('#stop-description').textContent = remaining.length
       ? `このCLIのスリープ防止を停止します。${remaining.join('と')}のスリープ防止は継続します。`
-      : 'dopaはMacのスリープを防止しなくなります。';
+      : 'DopaはMacのスリープを防止しなくなります。';
   }
   $('#stop-targets').textContent = targets.map(id => {
-    if (id === 'own') return 'dopa（このアプリ）';
+    if (id === 'own') return 'Dopa（このアプリ）';
     const session = cliSessions.find(item => item.id === id);
     return session ? `dopa CLI (PID ${session.pid})` : 'dopa CLI';
   }).join('\n');

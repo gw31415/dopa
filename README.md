@@ -1,4 +1,4 @@
-# dopa
+# Dopa
 
 macOS のシステムスリープと閉蓋スリープを抑制するCLIとメニューバーアプリです。root の `dopa-daemon` が電源操作を担当し、通常の `dopa` と `Dopa.app` は sudo なしで利用できます。
 
@@ -6,13 +6,20 @@ macOS のシステムスリープと閉蓋スリープを抑制するCLIとメ�
 
 ## ビルドと導入
 
-Swift 6.0 以上の Xcode または Command Line Tools、macOS 13 以上が対象です。外部パッケージへの依存はありません。
+macOS 13 以上が対象です。セットアップには mise が必要です。開発ツールは `mise.toml` で Swift 6.3.3、Node.js 26.8.1、Python 3.14.7 を固定し、`mise.lock` に配布物の取得先とチェックサムを記録しています。外部パッケージへの依存はありません。
 
 ```sh
-swift build -c release --product dopa
-swift build -c release --product dopa-daemon
+mise install --locked
+```
+
+CLI・デーモンのビルドには Xcode または Command Line Tools も必要です。App バンドルの生成には macOS 26 SDK を含む Xcode と、そこに含まれる `actool`・`codesign`・`plutil` を使います。これら Apple のツールは mise の管理対象外です。
+
+```sh
+make build
 sudo .build/release/dopa-daemon install
 ```
+
+`make build` は mise で選択した Swift を使い、CLI とデーモンを警告もエラーとして release ビルドします。Makefile はソースと生成物のタイムスタンプを比較し、変更のないビルドやテストは省略します。
 
 `install` は実行元のユーザーを許可ユーザーとして記録し、root 所有のデーモンのコピーと LaunchDaemon を配置して起動します。root の直接実行など実行元が特定できない場合は `install --user USER` を使います。`dopa` CLI は自分の PATH 上など任意の場所に配置できます。
 
@@ -42,7 +49,7 @@ v0.2.0 で `managed directory is writable by others: /private/var/run` が出る
 UIはmacOS 26以降とmacOS 26 SDKを含むXcodeが必要です。CLI・デーモンのmacOS 13対応は変わりません。
 
 ```sh
-mise exec -- scripts/build-app.sh
+make app
 open .build/Dopa.app
 ```
 
@@ -125,10 +132,11 @@ Unix domain stream socket 上で UTF-8 の NDJSON（1 行 1 JSON オブジェク
 ## 検証
 
 ```sh
-swift test
-swift build -c release --product dopa -Xswiftc -warnings-as-errors -Xcc -Wall -Xcc -Wextra -Xcc -Werror
-swift build -c release --product dopa-daemon -Xswiftc -warnings-as-errors -Xcc -Wall -Xcc -Wextra -Xcc -Werror
+make test
+make check
 ```
+
+`make test` は Swift とブラウザUI prototype のテストを実行します。`make check` はそれらに加えて、CLI とデーモンの厳格な release ビルドも行います。
 
 テストは模擬電源と一時ディレクトリを使用します。通常のテストでシステムの SleepDisabled や LaunchDaemon 登録を変更しません。製品にはテスト用の電源切り替えオプションを含めません。
 

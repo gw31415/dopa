@@ -35,7 +35,7 @@ launchd ── 起動・再起動 ────────┤
 | `DopaCore` | `DaemonService` による認証、セッション集約、状態通知、電源操作、既存ジャーナルの再利用 |
 | `CDopa` | 必要な POSIX / IOKit SPI の C ブリッジ。クライアントから電源操作を参照しない |
 
-デーモンと CLI は個別に配布・更新できる。UIバンドルは `scripts/build-app.sh` で生成し、`Contents/MacOS/dopa-ui` と、`Contents/Helpers/dopa`・`Contents/Helpers/dopa-daemon` を同梱する。補助実行ファイルを個別に署名してからAppを署名し、各実行権・署名・補助コマンドのヘルプ起動を検証する。UIはサービス導入や更新を自動実行しない。プロトコルの仕様と適合テストは言語非依存にし、Swift ライブラリの利用を外部クライアントに強制しない。
+デーモンと CLI は個別に配布・更新できる。ビルドと検証の入口は `Makefile` に集約する。UIバンドルは `make app` から `scripts/build-app.sh` を呼び出して生成し、`Contents/MacOS/dopa-ui` と、`Contents/Helpers/dopa`・`Contents/Helpers/dopa-daemon` を同梱する。補助実行ファイルを個別に署名してからAppを署名し、各実行権・署名・補助コマンドのヘルプ起動を検証する。UIはサービス導入や更新を自動実行しない。プロトコルの仕様と適合テストは言語非依存にし、Swift ライブラリの利用を外部クライアントに強制しない。
 
 ## コマンド
 
