@@ -1,16 +1,20 @@
 import CDopa
 import Darwin
+import DopaAuthorization
 import DopaProtocol
 import Foundation
 
 public enum DaemonService {
   public static func run(
     statePath: String = "/var/db/dopa", socketPath: String = "/var/run/dopa/control.sock",
-    allowedUID: uid_t, power: any Power, controls: any Controls, requireRoot: Bool = true
+    allowedUID: uid_t, power: any Power, controls: any Controls, requireRoot: Bool = true,
+    authorizationVerifier: ((Data) -> Bool)? = nil
   ) throws {
     guard !requireRoot || geteuid() == 0 else { throw DopaError("daemon run requires root") }
     let state = try State(path: statePath)
-    let engine = DaemonEngine(state: state, power: power, controls: controls)
+    let engine = DaemonEngine(
+      state: state, power: power, controls: controls,
+      authorizationVerifier: authorizationVerifier ?? DopaAuthorization.verifyExternalForm)
     let parent = URL(fileURLWithPath: socketPath).deletingLastPathComponent().path
     // Resolve system aliases above the managed directory, never the directory itself.
     let parentURL = URL(fileURLWithPath: parent)
@@ -222,6 +226,7 @@ final class DaemonEngine {
   let state: State
   let power: any Power
   let controls: any Controls
+  let authorizationVerifier: (Data) -> Bool
   let instanceID = UUID().uuidString
   var revision: UInt64 = 0
   var changed = false
@@ -233,10 +238,14 @@ final class DaemonEngine {
   var lastError: JSONValue = .null
   var draining = false
   private var events: [(Int32, JSONValue)] = []
-  init(state: State, power: any Power, controls: any Controls) {
+  init(
+    state: State, power: any Power, controls: any Controls,
+    authorizationVerifier: @escaping (Data) -> Bool = DopaAuthorization.verifyExternalForm
+  ) {
     self.state = state
     self.power = power
     self.controls = controls
+    self.authorizationVerifier = authorizationVerifier
     do {
       try Session.recover(power: power, state: state)
       disabled = try power.readDisabled()
@@ -357,7 +366,10 @@ final class DaemonEngine {
         result = .object([
           "apiVersion": .number(1), "daemonVersion": .string(DopaProtocol.clientVersion),
           "instanceId": .string(instanceID),
-          "capabilities": .array([.string("status.subscribe"), .string("session.update")]),
+          "capabilities": .array([
+            .string("status.subscribe"), .string("session.update"),
+            .string("session.stopSessions"), .string("admin.stopSessions"),
+          ]),
           "limits": .object([
             "maxMessageBytes": .number(65_536), "maxSessions": .number(32),
             "maxConnections": .number(64), "maxRequestIds": .number(65_536),
@@ -437,6 +449,60 @@ final class DaemonEngine {
           throw APIError("recovery_failed", "cleanup remains unconfirmed")
         }
         result = .object(["revision": .string(String(revision))])
+      case "session.stopSessions", "admin.stopSessions":
+        let isAdministrative = method == "admin.stopSessions"
+        let p = try fields(params, isAdministrative ? ["sessionIds", "authorization"] : ["sessionIds"])
+        guard let values = p["sessionIds"]?.arrayValue, !values.isEmpty, values.count <= 32 else {
+          throw APIError("invalid_params", "sessionIds must contain 1–32 session IDs")
+        }
+        var requested = Set<String>()
+        for value in values {
+          guard let sessionID = value.stringValue, !sessionID.isEmpty, sessionID.utf8.count <= 128,
+            !sessionID.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+            requested.insert(sessionID).inserted
+          else { throw APIError("invalid_params", "sessionIds must contain distinct valid IDs") }
+        }
+        if isAdministrative {
+          let authorization: Data?
+          if p["authorization"] == .null {
+            authorization = nil
+          } else {
+            guard let encoded = p["authorization"]?.stringValue,
+              let decoded = DopaAuthorization.decodeExternalForm(encoded)
+            else { throw APIError("invalid_params", "invalid authorization external form") }
+            authorization = decoded
+          }
+          guard peer.uid == 0 || authorization.map(authorizationVerifier) == true else {
+            throw APIError("permission_denied", "administrator authorization required")
+          }
+        }
+        // Select only the confirmed IDs, so a later session on the same peer
+        // can never be swept up by an old confirmation or repeated request.
+        let targets = sessions.filter { requested.contains($0.value.id) }
+        // ServicePeer.uid comes from the socket's kernel credentials. Check
+        // the entire selection before changing anything, including for root.
+        guard isAdministrative || targets.values.allSatisfy({ $0.peer.uid == peer.uid }) else {
+          throw APIError("permission_denied", "sessions owned by another user require administrator authorization")
+        }
+        if !targets.isEmpty {
+          do { try terminate("user_stopped", keys: Array(targets.keys)) } catch {
+            // A management request never removes unspecified sessions, even
+            // when applying the aggregate fails. Preserve the journal and
+            // expose the failure; new acquire/update operations stay disabled.
+            phase = "degraded"
+            disabled = nil
+            display = nil
+            lastError = errorValue("recovery_failed", "\(error)")
+            bump()
+            throw APIError("recovery_failed", "\(error)")
+          }
+        } else if phase == "degraded" {
+          throw APIError("recovery_failed", "cleanup remains unconfirmed")
+        }
+        result = .object([
+          "revision": .string(String(revision)),
+          "stoppedSessionIds": .array(targets.values.map(\.id).sorted().map(JSONValue.string)),
+        ])
       case "admin.prepareShutdown":
         _ = try fields(params, [])
         guard peer.uid == 0 else { throw APIError("permission_denied", "root required") }
@@ -493,6 +559,7 @@ final class DaemonEngine {
       checked = timestamp()
       phase = "active"
     }
+    lastError = .null
   }
   private func terminate(_ reason: String, keys: [Int32]) throws {
     let removed = keys.compactMap { sessions[$0] }

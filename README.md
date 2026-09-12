@@ -1,6 +1,6 @@
 # dopa
 
-macOS のシステムスリープと閉蓋スリープを抑制する CLI です。root の `dopa-daemon` が電源操作を担当し、通常の `dopa` は sudo なしで利用できます。UI は今回のスコープ外です。
+macOS のシステムスリープと閉蓋スリープを抑制するCLIとメニューバーアプリです。root の `dopa-daemon` が電源操作を担当し、通常の `dopa` と `Dopa.app` は sudo なしで利用できます。
 
 電源操作は IOKit を直接呼び、`pmset`、`caffeinate`、シェルを起動しません。サービスの登録・解除に限り、管理コマンドが `/bin/launchctl` を使用します。
 
@@ -36,6 +36,29 @@ v0.2.0 で `managed directory is writable by others: /private/var/run` が出る
 複数の `dopa` は同じデーモンに接続します。最後のセッションが終了するまで本体の抑制を続けます。`-d` のセッションが一つでもあれば画面消灯を抑制します。画面消灯時間そのものは変更せず、閉じた内蔵画面を点灯させるものではありません。
 
 `-l` は既に蓋が閉じていれば開始を拒否します。開始後は約 0.3 秒間隔で確認し、閉蓋時は指定したセッションだけを終了します。蓋を開けても自動再開しません。バッテリー残量による自動解除はありません。
+
+## メニューバーアプリ
+
+UIはmacOS 26以降とmacOS 26 SDKを含むXcodeが必要です。CLI・デーモンのmacOS 13対応は変わりません。
+
+```sh
+mise exec -- scripts/build-app.sh
+open .build/Dopa.app
+```
+
+ビルドスクリプトは `dopa-ui`・`dopa`・`dopa-daemon` のreleaseビルドを作り、UIを `Dopa.app/Contents/MacOS/dopa-ui`、CLIとデーモンを `Dopa.app/Contents/Helpers/` に同梱します。各実行ファイルの権限・署名と、同梱CLI・デーモンのヘルプ起動を確認します。同梱だけではサービスの導入・更新は行いません。Appに含まれるデーモンを導入する場合は次を実行します。
+
+```sh
+sudo .build/Dopa.app/Contents/Helpers/dopa-daemon install
+```
+
+CLIは `.build/Dopa.app/Contents/Helpers/dopa` から直接使うか、PATH上へコピーできます。
+
+`Dopa.app` はメニューバーに常駐し、メインウィンドウを持ちません。アイコンの通常クリックで操作パネルを開き、右クリックメニューからアプリを終了します。起動だけでは抑制を開始せず、パネルを閉じた後も実行中の期限を管理します。「このアプリ」で時間・終了時刻・無制限と動作設定を操作し、「全体管理」で各使用元の状態を確認できます。
+
+同じユーザーの使用元は確認後、管理者認証なしで停止できます（デーモンの `session.stopSessions` capabilityが必要）。別ユーザーの対象や旧デーモンの管理停止では、従来の `admin.stopSessions` とmacOS標準の管理者認証を使います。全体管理の各行に「消灯抑制」「閉じたら停止」の設定を表示し、いずれかの使用元によるディスプレイ消灯抑制が確認されている間はヘッダーに「消灯抑制」を表示します。更新する場合は新しいAppの同梱デーモン、または個別にビルドした `dopa-daemon` から `install` を再実行してください。更新時には進行中のセッションが終了します。UI自身はサービスを自動導入・更新しません。
+
+バンドルはローカル実行用のad-hoc署名です。一般配布には別途Developer ID署名とnotarizationが必要です。ログイン時の自動起動登録は行いません。
 
 ## 状態確認と削除
 
@@ -73,9 +96,9 @@ Unix domain stream socket 上で UTF-8 の NDJSON（1 行 1 JSON オブジェク
 {"id":"3","method":"session.acquire","params":{"options":{"keepDisplayOn":false,"stopOnLidClose":false}}}
 ```
 
-応答は同じ `id` と `result` または `error` を持ちます。セッションは取得した接続に所属し、切断時に解除されます。別接続から sessionId を指定しても操作できません。
+応答は同じ `id` と `result` または `error` を持ちます。セッションは取得した接続に所属し、切断時に解除されます。通常のrelease/updateは別接続からsessionIdを指定しても操作できません。
 
-公開操作は `hello`、`status.get`、`status.subscribe`、`status.unsubscribe`、`session.acquire`、`session.update`、`session.release` です。管理処理向けの `admin.prepareShutdown` は root に限定します。購読は初期状態と変更後の完全な snapshot を返します。
+公開操作は `hello`、`status.get`、`status.subscribe`、`status.unsubscribe`、`session.acquire`、`session.update`、`session.release` です。管理者認証付きの `admin.stopSessions` は確認済みIDをまとめて停止し、サービスの受付を維持します。更新・削除用の `admin.prepareShutdown` は root に限定します。購読は初期状態と変更後の完全な snapshot を返します。
 
 メッセージ上限は 64 KiB。フレーミング、互換性、応答・通知の順序、状態モデルとエラーの契約は [DESIGN.md](DESIGN.md) を参照してください。Swift 用の `DopaProtocol` と `DopaClient` もライブラリとして提供します。外部クライアントは別言語でも実装できます。
 
@@ -108,5 +131,9 @@ swift build -c release --product dopa-daemon -Xswiftc -warnings-as-errors -Xcc -
 ```
 
 テストは模擬電源と一時ディレクトリを使用します。通常のテストでシステムの SleepDisabled や LaunchDaemon 登録を変更しません。製品にはテスト用の電源切り替えオプションを含めません。
+
+UIを実電源に触れず確認する場合は `mise exec -- scripts/run-ui-fixture.sh` を実行し、メニューバーのカップアイコンから検証用パネルを開きます。専用バンドル・一時ソケット・模擬電源・ダミー認可を使い、UI終了時に自身のテストプロセスと一時ファイルを片付けます。`build-app.sh --ui-test-fixture` は独立したビルド領域でUIのみの `Dopa-Test.app` を生成し、CLI・デーモンを同梱しません。実際の管理者認証画面を試すものではありません。
+
+`PanelLayoutTests` は不可視のネイティブviewでタブ間の高さ、無制限切り替え、時間入力の整列を確認します。生成する `.build/ui-acceptance/panel.png` ではGlass素材を正しく描画できないため、素材と操作感の確認は実パネルで行います。
 
 実際の root サービス導入・SleepDisabled 書き込み・閉蓋継続は [実機受入れ手順](docs/acceptance.md) で別途確認してください。

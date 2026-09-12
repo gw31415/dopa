@@ -10,7 +10,11 @@ final class DopaConnectionTests: XCTestCase {
       let hello = try XCTUnwrap(try readFrame(client))
       XCTAssertEqual(hello["method"]?.stringValue, "hello")
       try sendFrame(
-        .object(["id": hello["id"]!, "result": .object(["apiVersion": .number(1)])]), to: client)
+        .object(["id": hello["id"]!, "result": .object([
+          "apiVersion": .number(1),
+          "capabilities": .array([.string("admin.stopSessions"), .string("future.operation")]),
+          "instanceId": .string("test-instance"),
+        ])]), to: client)
 
       let status = try XCTUnwrap(try readFrame(client))
       XCTAssertEqual(status["method"]?.stringValue, "status.get")
@@ -32,6 +36,8 @@ final class DopaConnectionTests: XCTestCase {
     defer { server.stop() }
 
     let connection = try DopaConnection(path: server.path, requireRoot: false, clientName: "test")
+    XCTAssertEqual(connection.capabilities, ["admin.stopSessions", "future.operation"])
+    XCTAssertEqual(connection.hello["instanceId"]?.stringValue, "test-instance")
     XCTAssertEqual(
       try connection.request(method: "status.get")["phase"]?.stringValue,
       "idle")
@@ -61,6 +67,7 @@ final class DopaConnectionTests: XCTestCase {
       server.stop()
     }
     let connection = try DopaConnection(path: server.path, requireRoot: false)
+    XCTAssertTrue(connection.capabilities.isEmpty)
     XCTAssertNil(try connection.receive(timeout: 0.01))
     ready.signal()
     XCTAssertEqual(try connection.receive(timeout: 2)?["event"]?.stringValue, "status.changed")

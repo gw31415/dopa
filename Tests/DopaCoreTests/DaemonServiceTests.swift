@@ -26,13 +26,17 @@ final class DaemonServiceTests: XCTestCase {
     }
     func lidClosed() throws -> Bool { lid }
   }
-  func withEngine(_ test: (DaemonEngine, FakePower, FakeControls) throws -> Void) throws {
+  func withEngine(
+    authorizationVerifier: @escaping (Data) -> Bool = { _ in false },
+    _ test: (DaemonEngine, FakePower, FakeControls) throws -> Void
+  ) throws {
     let path = NSTemporaryDirectory() + "dopa-engine-" + UUID().uuidString
     defer { try? FileManager.default.removeItem(atPath: path) }
     let state = try State(path: path)
     let power = FakePower()
     let controls = FakeControls()
-    let engine = DaemonEngine(state: state, power: power, controls: controls)
+    let engine = DaemonEngine(
+      state: state, power: power, controls: controls, authorizationVerifier: authorizationVerifier)
     try test(engine, power, controls)
   }
   func peer(_ uid: uid_t = 501) -> ServicePeer {
@@ -204,6 +208,299 @@ final class DaemonServiceTests: XCTestCase {
             ])
           ]))["error"]?["code"], .string("invalid_params"))
       XCTAssertFalse(power.disabled)
+    }
+  }
+
+  private var authorizationData: Data { Data(repeating: 0xAB, count: 32) }
+
+  private func stopParams(_ ids: [JSONValue], authorization: JSONValue = .null) -> JSONValue {
+    .object(["sessionIds": .array(ids), "authorization": authorization])
+  }
+
+  private func userStopParams(_ ids: [JSONValue]) -> JSONValue {
+    .object(["sessionIds": .array(ids)])
+  }
+
+  func testSameUIDStopAcrossConnectionsPreservesDisplayAggregateAndNotifiesOwners() throws {
+    for uid in [uid_t(501), uid_t(0)] {
+      var checks = 0
+      try withEngine(authorizationVerifier: { _ in checks += 1; return false }) { engine, power, controls in
+        let owner = peer(uid)
+        let otherDisplayOwner = peer(uid)
+        let otherUser = peer(uid == 0 ? 501 : 0)
+        let manager = peer(uid)
+        let targetID = acquire(engine, owner, display: true)["result"]!["sessionId"]!
+        let displayID = acquire(engine, otherDisplayOwner, display: true)["result"]!["sessionId"]!
+        let survivorID = acquire(engine, otherUser)["result"]!["sessionId"]!
+        let result = call(engine, manager, "session.stopSessions", userStopParams([targetID, .string("already-ended")]))
+        XCTAssertNil(result["error"])
+        XCTAssertEqual(result["result"]?["stoppedSessionIds"], .array([targetID]))
+        XCTAssertTrue(power.disabled && controls.display)
+        XCTAssertEqual(engine.sessions.count, 2)
+        let events = engine.takeEvents()
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.first?.0, owner.fd.value)
+        XCTAssertEqual(events.first?.1["data"]?["reason"], .string("user_stopped"))
+        XCTAssertEqual(events.first?.1["data"]?["cleanup"], .string("confirmed"))
+        XCTAssertEqual(events.first?.1["data"]?["revision"], result["result"]?["revision"])
+
+        XCTAssertNil(call(engine, manager, "session.stopSessions", userStopParams([displayID]))["error"])
+        XCTAssertTrue(power.disabled)
+        XCTAssertFalse(controls.display)
+        XCTAssertEqual(engine.sessions.count, 1)
+        XCTAssertEqual(engine.sessions[otherUser.fd.value]?.id, survivorID.stringValue)
+        XCTAssertEqual(engine.takeEvents().first?.0, otherDisplayOwner.fd.value)
+        XCTAssertEqual(engine.phase, "active")
+        XCTAssertFalse(engine.draining)
+        XCTAssertEqual(checks, 0)
+
+        let replacementID = acquire(engine, owner)["result"]!["sessionId"]!
+        XCTAssertNotEqual(replacementID, targetID)
+        let before = engine.snapshot()
+        let repeated = call(engine, manager, "session.stopSessions", userStopParams([targetID, displayID]))
+        XCTAssertNil(repeated["error"])
+        XCTAssertEqual(repeated["result"]?["stoppedSessionIds"], .array([]))
+        XCTAssertEqual(engine.snapshot(), before)
+        XCTAssertTrue(engine.takeEvents().isEmpty)
+      }
+    }
+  }
+
+  func testSameUIDStopRejectsMixedUIDSelectionAtomicallyIncludingForRoot() throws {
+    try withEngine { engine, power, controls in
+      let userOwner = peer(501)
+      let rootOwner = peer(0)
+      let userID = acquire(engine, userOwner, display: true)["result"]!["sessionId"]!
+      let rootID = acquire(engine, rootOwner)["result"]!["sessionId"]!
+      let before = engine.snapshot()
+      for uid in [uid_t(501), uid_t(0)] {
+        let manager = peer(uid)
+        for ids in [[userID, rootID], [rootID, userID]] {
+          let response = call(engine, manager, "session.stopSessions", userStopParams(ids))
+          XCTAssertEqual(response["error"]?["code"], .string("permission_denied"))
+          XCTAssertEqual(engine.snapshot(), before)
+          XCTAssertTrue(engine.takeEvents().isEmpty)
+          XCTAssertTrue(power.disabled && controls.display)
+        }
+      }
+    }
+  }
+
+  func testSameUIDStopValidatesIDsAndRejectsCallerSuppliedIdentityOrAuthorization() throws {
+    try withEngine { engine, power, _ in
+      let owner = peer()
+      let manager = peer()
+      let id = acquire(engine, owner)["result"]!["sessionId"]!
+      let before = engine.snapshot()
+      let invalid: [JSONValue] = [
+        .object([:]), .object(["sessionIds": .string("not-an-array")]),
+        .object(["sessionIds": .array([id]), "peerUID": .number(501)]),
+        stopParams([id]), userStopParams([]), userStopParams([id, id]),
+        userStopParams([id, .null]), userStopParams([.string("")]),
+        userStopParams([.string("bad\nID")]),
+        userStopParams([.string(String(repeating: "x", count: 129))]),
+        userStopParams((0..<33).map { .string(String($0)) }),
+      ]
+      for params in invalid {
+        let response = call(engine, manager, "session.stopSessions", params)
+        XCTAssertEqual(response["error"]?["code"], .string("invalid_params"))
+        XCTAssertEqual(engine.snapshot(), before)
+      }
+      XCTAssertTrue(power.disabled)
+      XCTAssertTrue(engine.takeEvents().isEmpty)
+    }
+  }
+
+  func testSameUIDStopCleanupFailureKeepsUnselectedSessionsAndCannotSucceedOnRetry() throws {
+    for leaveSurvivor in [false, true] {
+      try withEngine { engine, power, controls in
+        let owner = peer()
+        let manager = peer()
+        let survivor = peer(0)
+        let id = acquire(engine, owner, display: true)["result"]!["sessionId"]!
+        let survivorID = leaveSurvivor ? acquire(engine, survivor)["result"]!["sessionId"] : nil
+        if leaveSurvivor { controls.failRelease = true } else { power.failRestore = true }
+        let params = userStopParams([id])
+        XCTAssertEqual(call(engine, manager, "session.stopSessions", params)["error"]?["code"], .string("recovery_failed"))
+        XCTAssertEqual(engine.phase, "degraded")
+        XCTAssertEqual(engine.sessions.count, leaveSurvivor ? 1 : 0)
+        XCTAssertEqual(engine.sessions[survivor.fd.value]?.id, survivorID?.stringValue)
+        XCTAssertNil(engine.disabled)
+        XCTAssertNil(engine.display)
+        XCTAssertTrue(try engine.state.pending())
+        let events = engine.takeEvents()
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(events.first?.1["data"]?["reason"], .string("user_stopped"))
+        XCTAssertEqual(events.first?.1["data"]?["cleanup"], .string("failed"))
+        XCTAssertEqual(call(engine, manager, "session.stopSessions", params)["error"]?["code"], .string("recovery_failed"))
+        XCTAssertEqual(acquire(engine, owner)["error"]?["code"], .string("not_ready"))
+      }
+    }
+  }
+
+  func testAdminStopRequiresAuthorizationBeforeChangingAnySession() throws {
+    var checks = 0
+    try withEngine(authorizationVerifier: { _ in checks += 1; return false }) { engine, power, _ in
+      let owner = peer()
+      let manager = peer()
+      let id = acquire(engine, owner)["result"]!["sessionId"]!
+      let before = engine.snapshot()
+      XCTAssertEqual(
+        call(engine, manager, "admin.stopSessions", stopParams([id]))["error"]?["code"],
+        .string("permission_denied"))
+      let token = authorizationData.base64EncodedString()
+      let denied = call(
+        engine, manager, "admin.stopSessions", stopParams([id], authorization: .string(token)))
+      XCTAssertEqual(denied["error"]?["code"], .string("permission_denied"))
+      XCTAssertFalse(String(describing: denied).contains(token))
+      XCTAssertEqual(checks, 1)
+      XCTAssertEqual(engine.snapshot(), before)
+      XCTAssertTrue(power.disabled)
+      XCTAssertTrue(engine.takeEvents().isEmpty)
+    }
+  }
+
+  func testAdminStopValidatesEveryFieldEvenForRoot() throws {
+    try withEngine { engine, power, _ in
+      let owner = peer()
+      let manager = peer(0)
+      let id = acquire(engine, owner)["result"]!["sessionId"]!
+      let before = engine.snapshot()
+      let invalid: [JSONValue] = [
+        .object(["sessionIds": .array([id])]),
+        .object(["sessionIds": .array([id]), "authorization": .null, "unknown": .bool(true)]),
+        stopParams([]), stopParams([id, id]), stopParams([.null]), stopParams([.string("")]),
+        stopParams([.string("bad\nID")]), stopParams([.string(String(repeating: "x", count: 129))]),
+        stopParams((0..<33).map { .string(String($0)) }),
+        stopParams([id], authorization: .bool(true)),
+        stopParams([id], authorization: .string("bad-token")),
+      ]
+      for params in invalid {
+        let response = call(engine, manager, "admin.stopSessions", params)
+        XCTAssertEqual(response["error"]?["code"], .string("invalid_params"))
+        XCTAssertEqual(engine.snapshot(), before)
+      }
+      XCTAssertTrue(power.disabled)
+      XCTAssertTrue(engine.takeEvents().isEmpty)
+    }
+  }
+
+  func testAuthorizedStopSelectsOnlyConfirmedIDsAndNotifiesOwner() throws {
+    var checkedData: Data?
+    try withEngine(authorizationVerifier: { checkedData = $0; return true }) { engine, power, controls in
+      let owner = peer(0)
+      let survivor = peer()
+      let manager = peer()
+      let targetID = acquire(engine, owner, display: true)["result"]!["sessionId"]!
+      let survivorID = acquire(engine, survivor)["result"]!["sessionId"]!
+      let result = call(
+        engine, manager, "admin.stopSessions",
+        stopParams([targetID, .string("already-ended")],
+          authorization: .string(authorizationData.base64EncodedString())))
+      XCTAssertEqual(checkedData, authorizationData)
+      XCTAssertNil(result["error"])
+      XCTAssertEqual(result["result"]?["stoppedSessionIds"], .array([targetID]))
+      XCTAssertEqual(engine.sessions.count, 1)
+      XCTAssertEqual(engine.sessions[survivor.fd.value]?.id, survivorID.stringValue)
+      XCTAssertTrue(power.disabled)
+      XCTAssertFalse(controls.display)
+      XCTAssertFalse(engine.draining)
+      let events = engine.takeEvents()
+      XCTAssertEqual(events.count, 1)
+      XCTAssertEqual(events.first?.0, owner.fd.value)
+      XCTAssertEqual(events.first?.1["event"], .string("session.ended"))
+      XCTAssertEqual(events.first?.1["data"]?["sessionId"], targetID)
+      XCTAssertEqual(events.first?.1["data"]?["reason"], .string("user_stopped"))
+      XCTAssertEqual(events.first?.1["data"]?["cleanup"], .string("confirmed"))
+      XCTAssertEqual(events.first?.1["data"]?["revision"], result["result"]?["revision"])
+      // Normal connection-owned operations remain restricted for root too.
+      XCTAssertEqual(
+        call(engine, owner, "session.release", .object(["sessionId": survivorID]))["error"]?["code"],
+        .string("session_not_owned"))
+    }
+  }
+
+  func testRootStopAllLeavesDaemonReadyAndStaleIDsCannotStopReplacement() throws {
+    var checks = 0
+    try withEngine(authorizationVerifier: { _ in checks += 1; return false }) { engine, power, _ in
+      let one = peer()
+      let two = peer()
+      let manager = peer(0)
+      let oneID = acquire(engine, one)["result"]!["sessionId"]!
+      let twoID = acquire(engine, two)["result"]!["sessionId"]!
+      let params = stopParams([oneID, twoID])
+      XCTAssertNil(call(engine, manager, "admin.stopSessions", params)["error"])
+      XCTAssertEqual(checks, 0)
+      XCTAssertEqual(engine.phase, "idle")
+      XCTAssertFalse(engine.draining)
+      XCTAssertFalse(power.disabled)
+      XCTAssertFalse(try engine.state.pending())
+      XCTAssertEqual(engine.takeEvents().count, 2)
+      let newID = acquire(engine, one)["result"]!["sessionId"]!
+      XCTAssertNotEqual(newID, oneID)
+      let before = engine.snapshot()
+      let repeated = call(engine, manager, "admin.stopSessions", params)
+      XCTAssertNil(repeated["error"])
+      XCTAssertEqual(repeated["result"]?["stoppedSessionIds"], .array([]))
+      XCTAssertEqual(engine.snapshot(), before)
+      XCTAssertTrue(power.disabled)
+      XCTAssertTrue(engine.takeEvents().isEmpty)
+    }
+  }
+
+  func testAdminStopCleanupFailureRemainsAnErrorOnRetry() throws {
+    try withEngine { engine, power, _ in
+      let owner = peer()
+      let manager = peer(0)
+      let id = acquire(engine, owner)["result"]!["sessionId"]!
+      power.failRestore = true
+      let params = stopParams([id])
+      XCTAssertEqual(
+        call(engine, manager, "admin.stopSessions", params)["error"]?["code"],
+        .string("recovery_failed"))
+      XCTAssertEqual(engine.phase, "degraded")
+      XCTAssertTrue(try engine.state.pending())
+      let event = engine.takeEvents().first?.1
+      XCTAssertEqual(event?["data"]?["reason"], .string("user_stopped"))
+      XCTAssertEqual(event?["data"]?["cleanup"], .string("failed"))
+      XCTAssertEqual(
+        call(engine, manager, "admin.stopSessions", params)["error"]?["code"],
+        .string("recovery_failed"))
+      XCTAssertEqual(acquire(engine, owner)["error"]?["code"], .string("not_ready"))
+    }
+  }
+
+  func testAdminStopFailurePreservesUnspecifiedSessionAndReportsUnconfirmedPower() throws {
+    try withEngine { engine, power, controls in
+      let owner = peer()
+      let survivor = peer()
+      let manager = peer(0)
+      let id = acquire(engine, owner, display: true)["result"]!["sessionId"]!
+      let survivorID = acquire(engine, survivor)["result"]!["sessionId"]!
+      controls.failRelease = true
+      XCTAssertEqual(
+        call(engine, manager, "admin.stopSessions", stopParams([id]))["error"]?["code"],
+        .string("recovery_failed"))
+      XCTAssertEqual(engine.phase, "degraded")
+      XCTAssertEqual(engine.sessions.count, 1)
+      XCTAssertEqual(engine.sessions[survivor.fd.value]?.id, survivorID.stringValue)
+      XCTAssertNil(engine.display)
+      XCTAssertTrue(try engine.state.pending())
+      XCTAssertEqual(engine.takeEvents().count, 1)
+      // A later check exposes any external mismatch while staying degraded;
+      // desired=true must not be confused with confirmed inhibition.
+      power.disabled = false
+      engine.checkPower()
+      XCTAssertEqual(engine.phase, "degraded")
+      XCTAssertFalse(engine.disabled ?? true)
+      XCTAssertEqual(engine.snapshot()["desired"]?["systemSleepDisabled"], .bool(true))
+      XCTAssertEqual(engine.sessions.count, 1)
+      controls.failRelease = false
+      XCTAssertEqual(engine.snapshot()["lastError"]?["code"], .string("recovery_failed"))
+      XCTAssertNil(call(engine, survivor, "session.release", .object(["sessionId": survivorID]))["error"])
+      XCTAssertFalse(try engine.state.pending())
+      XCTAssertEqual(engine.snapshot()["phase"], .string("idle"))
+      XCTAssertEqual(engine.snapshot()["lastError"], .null)
     }
   }
 }

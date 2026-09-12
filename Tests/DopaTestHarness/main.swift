@@ -77,12 +77,16 @@ do {
     let directory = URL(fileURLWithPath: path)
     try Runtime.installSignals()
     if env["DOPA_TEST_DAEMON"] == "1" {
+      // Only this explicit test executable accepts a dummy authorization.
+      // The production daemon always uses macOS Authorization Services.
+      let authorizationVerifier: ((Data) -> Bool)? = env["DOPA_TEST_ADMIN_AUTH"] == "1"
+        ? { $0 == Data(repeating: 0xAB, count: 32) } : nil
       try DaemonService.run(
         statePath: directory.appendingPathComponent("state").path,
         socketPath: directory.appendingPathComponent("ipc/control.sock").path,
         allowedUID: env["DOPA_TEST_ALLOWED_UID"].flatMap(UInt32.init) ?? geteuid(),
         power: FilePower(directory), controls: FileControls(directory),
-        requireRoot: false)
+        requireRoot: false, authorizationVerifier: authorizationVerifier)
     } else if env["DOPA_TEST_CHILD"] == "1" {
       try "\(getsid(0))\n\(getpid())\n".write(
         to: directory.appendingPathComponent("guardian-session"), atomically: true, encoding: .utf8)

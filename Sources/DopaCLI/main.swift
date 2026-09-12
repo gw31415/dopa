@@ -178,7 +178,7 @@ private func runSession(_ options: Options) throws {
         throw CLIError("dopa-daemon ended the session without confirming cleanup", status: 1)
       }
       let reason = event["data"]?["reason"]?.stringValue ?? "unknown"
-      if reason == "lid_closed" || reason == "daemon_shutdown" { return }
+      if reason == "lid_closed" || reason == "daemon_shutdown" || reason == "user_stopped" { return }
       throw CLIError("dopa-daemon ended the session (\(reason))", status: 1)
     } catch let error as CLIError {
       throw error

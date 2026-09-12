@@ -73,6 +73,13 @@ public final class DopaConnection {
 
   public let path: String
   public let clientName: String
+  /// Negotiated hello metadata. Unknown capabilities remain available to callers.
+  public private(set) var hello: JSONValue = .null
+
+  public var capabilities: Set<String> {
+    guard case .array(let values) = hello.objectValue?["capabilities"] else { return [] }
+    return Set(values.compactMap(\.stringValue))
+  }
 
   public init(
     path: String = DopaConnection.defaultSocketPath,
@@ -98,6 +105,7 @@ public final class DopaConnection {
         timeout: 5
       )
       try Self.validateHello(hello)
+      self.hello = hello
     } catch {
       closeUnlocked()
       throw error
