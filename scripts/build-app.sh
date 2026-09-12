@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 BUILD_ROOT="${ROOT_DIR}/.build"
 INFO_PLIST_SOURCE="${ROOT_DIR}/Resources/Dopa-Info.plist"
+ICON_SOURCE="${ROOT_DIR}/Resources/Dopa.icon"
 
 usage() {
   cat <<'EOF'
@@ -37,6 +38,10 @@ case "${1:-}" in
 esac
 
 [[ -f "${INFO_PLIST_SOURCE}" ]] || die "missing ${INFO_PLIST_SOURCE}"
+[[ -d "${ICON_SOURCE}" ]] || die "missing ${ICON_SOURCE}"
+
+ACTOOL_BIN="$(xcrun --sdk macosx --find actool 2>/dev/null || true)"
+[[ -n "${ACTOOL_BIN}" ]] || die "actool is required to compile ${ICON_SOURCE}"
 
 if [[ -x /opt/homebrew/bin/mise ]]; then
   MISE_BIN=/opt/homebrew/bin/mise
@@ -92,6 +97,36 @@ if (( fixture )); then
   plutil -replace CFBundleIdentifier -string "${BUNDLE_IDENTIFIER}" "${INFO_PLIST_PATH}"
   plutil -replace CFBundleDisplayName -string "dopa (UI test)" "${INFO_PLIST_PATH}"
 fi
+
+ICON_NAME="${ICON_SOURCE##*/}"
+ICON_NAME="${ICON_NAME%.icon}"
+ICON_PARTIAL_INFO="${BUILD_ROOT}/${ICON_NAME}-icon-partial.plist"
+rm -f "${ICON_PARTIAL_INFO}"
+printf 'Compiling %s…\n' "${ICON_SOURCE}"
+if ! "${ACTOOL_BIN}" \
+  --compile "${RESOURCES_PATH}" \
+  --platform macosx \
+  --minimum-deployment-target 26.0 \
+  --app-icon "${ICON_NAME}" \
+  --standalone-icon-behavior default \
+  --output-partial-info-plist "${ICON_PARTIAL_INFO}" \
+  "${ICON_SOURCE}"; then
+  die "actool failed to compile ${ICON_SOURCE}"
+fi
+[[ -f "${RESOURCES_PATH}/Assets.car" ]] || die "actool did not produce Assets.car"
+[[ -f "${RESOURCES_PATH}/${ICON_NAME}.icns" ]] || die "actool did not produce ${ICON_NAME}.icns"
+[[ "$(plutil -extract CFBundleIconFile raw -o - "${ICON_PARTIAL_INFO}")" == "${ICON_NAME}" ]] \
+  || die "actool did not declare CFBundleIconFile"
+[[ "$(plutil -extract CFBundleIconName raw -o - "${ICON_PARTIAL_INFO}")" == "${ICON_NAME}" ]] \
+  || die "actool did not declare CFBundleIconName"
+
+if ! plutil -replace CFBundleIconFile -string "${ICON_NAME}" "${INFO_PLIST_PATH}" 2>/dev/null; then
+  plutil -insert CFBundleIconFile -string "${ICON_NAME}" "${INFO_PLIST_PATH}"
+fi
+if ! plutil -replace CFBundleIconName -string "${ICON_NAME}" "${INFO_PLIST_PATH}" 2>/dev/null; then
+  plutil -insert CFBundleIconName -string "${ICON_NAME}" "${INFO_PLIST_PATH}"
+fi
+rm -f "${ICON_PARTIAL_INFO}"
 
 plutil -lint "${INFO_PLIST_PATH}" >/dev/null
 [[ "$(plutil -extract CFBundleExecutable raw -o - "${INFO_PLIST_PATH}")" == dopa-ui ]] \

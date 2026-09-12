@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Dopa — a light through the night</title>
+  <desc>Original vector artwork. Two foreground shapes; no raster images, filters, strokes, masks, or traced paths. System enclosure and glass materials are supplied by Icon Composer.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="0" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#4A51B7"/>
+      <stop offset="1" stop-color="#171D5E"/>
+    </linearGradient>
+  </defs>
+  <g id="background-layer"><path fill="url(#background)" d="M0 0H1024V1024H0Z"/></g>
+  <g id="moon-layer"><path fill="#D5EEFF" d="M519 215C353 211 218 342 218 512C218 681 354 818 523 818C643 818 750 750 801 648C808 634 793 620 780 627C727 654 666 660 608 641C475 598 402 455 445 322C457 284 481 250 511 227C518 222 522 219 519 215Z"/></g>
+  <g id="light-layer"><circle cx="660" cy="365" r="137" fill="#FFBE61"/></g>
+</svg>

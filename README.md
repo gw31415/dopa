@@ -46,7 +46,7 @@ mise exec -- scripts/build-app.sh
 open .build/Dopa.app
 ```
 
-ビルドスクリプトは `dopa-ui`・`dopa`・`dopa-daemon` のreleaseビルドを作り、UIを `Dopa.app/Contents/MacOS/dopa-ui`、CLIとデーモンを `Dopa.app/Contents/Helpers/` に同梱します。各実行ファイルの権限・署名と、同梱CLI・デーモンのヘルプ起動を確認します。同梱だけではサービスの導入・更新は行いません。Appに含まれるデーモンを導入する場合は次を実行します。
+ビルドスクリプトは `dopa-ui`・`dopa`・`dopa-daemon` のreleaseビルドを作り、`Resources/Dopa.icon` を `actool` で macOS 26向けにコンパイルして `Dopa.app/Contents/Resources/Assets.car` と `Dopa.app/Contents/Resources/Dopa.icns` を生成します。UIを `Dopa.app/Contents/MacOS/dopa-ui`、CLIとデーモンを `Dopa.app/Contents/Helpers/` に同梱します。各実行ファイルの権限・署名と、同梱CLI・デーモンのヘルプ起動を確認します。同梱だけではサービスの導入・更新は行いません。Appに含まれるデーモンを導入する場合は次を実行します。
 
 ```sh
 sudo .build/Dopa.app/Contents/Helpers/dopa-daemon install
