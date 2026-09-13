@@ -266,6 +266,47 @@ final class AppModelTests: XCTestCase {
     XCTAssertFalse(model.authorizing)
   }
 
+  func testHiddenClockDoesNotPublishTicksButStillExpiresOwnSession() async throws {
+    let idle = modelSnapshotJSON(phase: "idle")
+    let running = modelSnapshotJSON(
+      revision: "3", phase: "active",
+      sessions: [modelSessionJSON(id: "own", clientName: "Dopa UI", pid: 2187)],
+      systemSleepDisabled: true)
+    let transport = MockDaemonTransport(
+      handshake: DaemonHandshake(capabilities: [], snapshot: try DaemonSnapshot(idle)),
+      statusValue: running)
+    let model = AppModel(transport: transport)
+    try await model.connectOnce()
+    await model.start()
+    let published = model.now
+    let deadline = try XCTUnwrap(model.schedule.deadline)
+
+    await model.processClockTick(at: deadline.addingTimeInterval(-1))
+
+    XCTAssertEqual(model.now, published)
+    XCTAssertEqual(model.ownSessionID, "own")
+
+    await model.processClockTick(at: deadline.addingTimeInterval(1))
+
+    XCTAssertEqual(model.now, deadline.addingTimeInterval(1))
+    XCTAssertNil(model.ownSessionID)
+    XCTAssertFalse(model.schedule.running)
+  }
+
+  func testVisibleClockPublishesTicks() async throws {
+    let idle = modelSnapshotJSON(phase: "idle")
+    let model = AppModel(transport: MockDaemonTransport(
+      handshake: DaemonHandshake(capabilities: [], snapshot: try DaemonSnapshot(idle)),
+      statusValue: idle))
+    model.setPresentationActive(true)
+    let tick = Date().addingTimeInterval(10)
+
+    await model.processClockTick(at: tick)
+
+    XCTAssertEqual(model.now, tick)
+    model.setPresentationActive(false)
+  }
+
   func testStalePollSnapshotCannotClearOwnedIDAfterAcquire() async throws {
     let idle = modelSnapshotJSON(phase: "idle")
     let running = modelSnapshotJSON(

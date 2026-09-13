@@ -30,6 +30,7 @@ public final class AppModel {
   @ObservationIgnored private var connectionGeneration: UInt64 = 0
   @ObservationIgnored private var revisionFloor: (instance: String, revision: String)?
   @ObservationIgnored private var pendingCleanupIDs: Set<String> = []
+  @ObservationIgnored private var presentationActive = false
 
   public init(
     transport: any DaemonTransport = SocketTransport(),
@@ -86,17 +87,37 @@ public final class AppModel {
             } catch { await self.disconnected(error) }
           }
         }
-        let delay: UInt64 = self.connectionState == .connected ? 250_000_000 : 3_000_000_000
+        let delay: UInt64
+        if self.connectionState != .connected { delay = 3_000_000_000 }
+        else if self.presentationActive || self.ownSessionID != nil { delay = 250_000_000 }
+        else { delay = 1_000_000_000 }
         try? await Task.sleep(nanoseconds: delay)
       }
     }
     ticking = Task { [weak self] in
       while !Task.isCancelled {
         guard let self, !self.shuttingDown else { return }
-        await self.advanceClock(to: Date())
-        try? await Task.sleep(nanoseconds: 250_000_000)
+        await self.processClockTick(at: Date())
+        let delay: UInt64 = self.presentationActive || self.ownSessionID != nil
+          ? 1_000_000_000 : 5_000_000_000
+        try? await Task.sleep(nanoseconds: delay)
       }
     }
+  }
+
+  public func setPresentationActive(_ active: Bool) {
+    presentationActive = active
+    if active { now = Date() }
+  }
+
+  func processClockTick(at date: Date) async {
+    if presentationActive {
+      await advanceClock(to: date)
+      return
+    }
+    guard !busy, ownSessionID != nil, let deadline = schedule.deadline,
+      deadline <= date else { return }
+    await advanceClock(to: date)
   }
 
   public func connectOnce() async throws {

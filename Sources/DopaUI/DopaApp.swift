@@ -519,12 +519,17 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
   }
 
   func popoverWillShow(_ notification: Notification) {
+    Self.model?.setPresentationActive(true)
     guard let popover = notification.object as? NSPopover,
       let window = popover.contentViewController?.view.window,
       popoverInitialFocusView != nil
     else { return }
 
     preparePopoverFocus(in: window)
+  }
+
+  func popoverDidClose(_ notification: Notification) {
+    Self.model?.setPresentationActive(false)
   }
 
   private func clearTimeFieldFocus() {
