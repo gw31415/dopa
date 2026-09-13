@@ -21,22 +21,25 @@ final class DaemonUIStateTests: XCTestCase {
       isInstalled: true, connectionState: .disconnected, isConfirmed: false,
       hasSessions: false, isStarting: true)
     XCTAssertEqual(starting, .starting)
-    XCTAssertEqual(starting.symbol, "moon")
-    XCTAssertEqual(starting.status, "dopa-daemon起動準備中")
+    XCTAssertEqual(starting.symbol, "progress.indicator")
+    XCTAssertEqual(starting.status, "dopa-daemonとの接続を確認中")
+    XCTAssertTrue(starting.showsActivityIndicator)
     XCTAssertEqual(starting.clickAction, .normal)
 
     let installing = DaemonUIState.resolve(
       isInstalled: false, connectionState: .disconnected, isConfirmed: false,
       hasSessions: false, isStarting: true)
-    XCTAssertEqual(installing, .starting)
+    XCTAssertEqual(installing, .installing)
     XCTAssertEqual(installing.symbol, "moon")
+    XCTAssertEqual(installing.status, "dopa-daemonインストール中")
+    XCTAssertFalse(installing.showsActivityIndicator)
     XCTAssertEqual(installing.clickAction, .normal)
 
     let reconnecting = DaemonUIState.resolve(
       isInstalled: true, connectionState: .connecting, isConfirmed: false,
       hasSessions: false, isStarting: true)
     XCTAssertEqual(reconnecting, .starting)
-    XCTAssertEqual(reconnecting.symbol, "moon")
+    XCTAssertTrue(reconnecting.showsActivityIndicator)
 
     let checking = DaemonUIState.resolve(
       isInstalled: true, connectionState: .connecting, isConfirmed: false, hasSessions: false)

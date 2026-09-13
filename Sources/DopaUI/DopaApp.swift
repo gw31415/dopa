@@ -52,10 +52,12 @@ struct DopaApp: App {
 @MainActor
 final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
   private enum DaemonManagementAction { case install, start }
+  private static let daemonConnectionTimeout: Duration = .seconds(10)
 
   static var model: AppModel?
 
   private var statusItem: NSStatusItem?
+  private var statusActivityIndicator: NSProgressIndicator?
   private var popover: NSPopover?
   private var popoverInitialFocusView: PopoverInitialFocusView?
   private let daemonInstaller = DaemonInstaller()
@@ -113,6 +115,7 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
     }
     let managementTask = daemonManagementTask
     managementTask?.cancel()
+    daemonStartupTransitionTimeoutTask?.cancel()
     terminationTask = Task { [weak self] in
       await managementTask?.value
       let canQuit = await model.shutdown()
@@ -168,6 +171,19 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
     button.imagePosition = .imageOnly
     button.imageScaling = .scaleNone
 
+    let activityIndicator = NSProgressIndicator()
+    activityIndicator.style = .spinning
+    activityIndicator.controlSize = .small
+    activityIndicator.isIndeterminate = true
+    activityIndicator.isDisplayedWhenStopped = false
+    activityIndicator.translatesAutoresizingMaskIntoConstraints = false
+    button.addSubview(activityIndicator)
+    NSLayoutConstraint.activate([
+      activityIndicator.centerXAnchor.constraint(equalTo: button.centerXAnchor),
+      activityIndicator.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+    ])
+    statusActivityIndicator = activityIndicator
+
     let popover = NSPopover()
     popover.behavior = .transient
     popover.animates = true
@@ -196,8 +212,16 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
     let state = daemonUIState
     let status = state.status ?? model.status
     button.title = ""
-    button.image = NSImage(systemSymbolName: state.symbol, accessibilityDescription: status)
-    button.image?.isTemplate = true
+    if state.showsActivityIndicator {
+      button.image = nil
+      statusActivityIndicator?.isHidden = false
+      statusActivityIndicator?.startAnimation(nil)
+    } else {
+      statusActivityIndicator?.stopAnimation(nil)
+      statusActivityIndicator?.isHidden = true
+      button.image = NSImage(systemSymbolName: state.symbol, accessibilityDescription: status)
+      button.image?.isTemplate = true
+    }
     button.toolTip = "Dopa — \(status)"
     button.setAccessibilityLabel("Dopa — \(status)")
   }
@@ -391,15 +415,28 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
   }
 
   private func beginDaemonStartupTransitionTimeout() {
-    daemonStartupTransitionTimeoutTask?.cancel()
+    guard daemonStartupTransitionTimeoutTask == nil else { return }
     daemonStartupTransitionTimeoutTask = Task { [weak self] in
-      try? await Task.sleep(for: .seconds(10))
+      do { try await Task.sleep(for: Self.daemonConnectionTimeout) }
+      catch { return }
       guard !Task.isCancelled, let self,
         Self.model?.connectionState != .connected else { return }
       daemonStartupTransitionActive = false
       daemonStartupTransitionTimeoutTask = nil
+      daemonManagementTask?.cancel()
       updateStatusItem()
+      guard !terminationRequested else { return }
+      presentDaemonConnectionTimeoutError()
     }
+  }
+
+  private func presentDaemonConnectionTimeoutError() {
+    let alert = NSAlert()
+    alert.alertStyle = .critical
+    alert.messageText = "dopa-daemonとの接続を確認できませんでした"
+    alert.informativeText =
+      "dopa-daemonのインストールまたは起動後、10秒以内に接続できませんでした。サービスの状態を確認して再試行してください。"
+    _ = runFocusedModal(alert)
   }
 
   private func beginDaemonInstallationMonitoring() {
@@ -422,6 +459,12 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
       daemonStartupTransitionActive = false
       daemonStartupTransitionTimeoutTask?.cancel()
       daemonStartupTransitionTimeoutTask = nil
+    } else if daemonStartupTransitionActive,
+      Self.model?.connectionState != .connected {
+      // During a first install, secure managed files become observable before
+      // the privileged helper finishes its readiness check. Start the UI's
+      // own bounded connection wait at the same moment the spinner appears.
+      beginDaemonStartupTransitionTimeout()
     }
     updateStatusItem()
   }
