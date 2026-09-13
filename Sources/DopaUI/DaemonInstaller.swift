@@ -53,6 +53,10 @@ struct DaemonInstaller: Sendable {
     self.runElevated = runElevated
   }
 
+  /// Managed files the installation watcher observes. Verification stays
+  /// lstat-based in `isInstalled`; these URLs are only watch hints.
+  var managedFileURLs: [URL] { [layout.plistURL, layout.executableURL] }
+
   var isInstalled: Bool {
     Self.isSecureRegularFile(
       layout.plistURL, ownerUID: layout.ownerUID, ownerGID: layout.ownerGID)
@@ -119,8 +123,17 @@ struct DaemonInstaller: Sendable {
       FileManager.default.isExecutableFile(atPath: bundledDaemonURL.path)
     else { throw DaemonInstallerError.bundledDaemonUnavailable }
     return try await Task.detached { [bundledDaemonURL] in
-      SHA256.hash(data: try Data(contentsOf: bundledDaemonURL))
-        .map { String(format: "%02x", $0) }.joined()
+      // Hash in bounded chunks instead of materializing the whole executable
+      // just to hash it. Replacement after this read is still detected: the
+      // elevated shell command re-computes this digest with shasum and
+      // re-runs codesign verification before installing.
+      let handle = try FileHandle(forReadingFrom: bundledDaemonURL)
+      defer { try? handle.close() }
+      var hasher = SHA256()
+      while let chunk = try handle.read(upToCount: 256 * 1024), !chunk.isEmpty {
+        hasher.update(data: chunk)
+      }
+      return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }.value
   }
 

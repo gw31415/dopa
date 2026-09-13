@@ -570,9 +570,7 @@ private func _formatDuration(_ seconds: Int) -> String {
   let hours = value / 3600
   let minutes = value / 60 % 60
   let remainder = value % 60
-  return [hours, minutes, remainder]
-    .map(twoDigits)
-    .joined(separator: ":")
+  return twoDigits(hours) + ":" + twoDigits(minutes) + ":" + twoDigits(remainder)
 }
 
 /// Parses HH:MM or HH:MM:SS. Hours may be one or two digits, while minutes
@@ -615,9 +613,7 @@ private func _clockValue(_ date: Date, calendar: Calendar) -> String {
   guard let hour = components.hour, let minute = components.minute, let second = components.second else {
     return ""
   }
-  return [hour, minute, second]
-    .map(twoDigits)
-    .joined(separator: ":")
+  return twoDigits(hour) + ":" + twoDigits(minute) + ":" + twoDigits(second)
 }
 
 /// Returns the next local occurrence represented by an HH:MM or HH:MM:SS

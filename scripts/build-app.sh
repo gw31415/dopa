@@ -72,8 +72,26 @@ else
 fi
 swift_build_args+=(--scratch-path "${SCRATCH_PATH}")
 
+# Serialise each destination bundle for the whole build. Without this lock,
+# concurrent invocations can both remove/replace the same final path and one
+# `mv` can silently nest its staging bundle inside the other result.
+mkdir -p "${BUILD_ROOT}"
+APP_PATH="${BUILD_ROOT}/${APP_NAME}"
+LOCK_PATH="${BUILD_ROOT}/.${APP_NAME}.build.lock"
+if [[ "${DOPA_BUILD_APP_LOCK_PATH:-}" != "${LOCK_PATH}" ]]; then
+  # Let lockf remain the parent for the complete build. Its own lock
+  # descriptor is close-on-exec, so long-lived Xcode helper processes cannot
+  # inherit it and delay a later build after this script has finished.
+  exec /usr/bin/lockf -k "${LOCK_PATH}" \
+    /usr/bin/env DOPA_BUILD_APP_LOCK_PATH="${LOCK_PATH}" "$0" "$@"
+fi
+
 printf 'Building %s…\n' "${APP_NAME}"
+# SwiftPM accepts one --product value per invocation. Reusing this scratch
+# path lets the products share the same dependency graph and compiler flags,
+# while separate invocations ensure that every requested executable is built.
 for product in "${products[@]}"; do
+  printf 'Building product %s…\n' "${product}"
   (cd "${ROOT_DIR}" && "${MISE_BIN}" exec -- swift "${swift_build_args[@]}" --product "${product}")
 done
 
@@ -91,14 +109,28 @@ UI_SDK_MAJOR="${UI_SDK_VERSION%%.*}"
   || die "dopa-ui was built with macOS SDK ${UI_SDK_VERSION}; mise must select macOS SDK 26 or newer"
 printf 'Verified dopa-ui macOS SDK %s\n' "${UI_SDK_VERSION}"
 
-APP_PATH="${BUILD_ROOT}/${APP_NAME}"
-CONTENTS_PATH="${APP_PATH}/Contents"
+STAGING_APP_PATH="${BUILD_ROOT}/.${APP_NAME}.staging-$$"
+BACKUP_APP_PATH="${BUILD_ROOT}/.${APP_NAME}.backup-$$"
+rm -rf "${STAGING_APP_PATH}"
+rm -rf "${BACKUP_APP_PATH}"
+had_previous_app=0
+cleanup_staging_and_restore() {
+  local status=$?
+  if (( had_previous_app )) && [[ ! -e "${APP_PATH}" ]] && [[ -e "${BACKUP_APP_PATH}" ]]; then
+    mv "${BACKUP_APP_PATH}" "${APP_PATH}" \
+      || printf 'build-app: could not restore %s from %s\n' \
+        "${APP_PATH}" "${BACKUP_APP_PATH}" >&2
+  fi
+  rm -rf "${STAGING_APP_PATH}" || true
+  exit "${status}"
+}
+trap cleanup_staging_and_restore EXIT
+CONTENTS_PATH="${STAGING_APP_PATH}/Contents"
 MACOS_PATH="${CONTENTS_PATH}/MacOS"
 HELPERS_PATH="${CONTENTS_PATH}/Helpers"
 RESOURCES_PATH="${CONTENTS_PATH}/Resources"
 INFO_PLIST_PATH="${CONTENTS_PATH}/Info.plist"
 
-rm -rf "${APP_PATH}"
 mkdir -p "${MACOS_PATH}" "${RESOURCES_PATH}"
 install -m 0755 "${BIN_DIR}/dopa-ui" "${MACOS_PATH}/dopa-ui"
 if (( ! fixture )); then
@@ -117,7 +149,7 @@ fi
 
 ICON_NAME="${ICON_SOURCE##*/}"
 ICON_NAME="${ICON_NAME%.icon}"
-ICON_PARTIAL_INFO="${BUILD_ROOT}/${ICON_NAME}-icon-partial.plist"
+ICON_PARTIAL_INFO="${CONTENTS_PATH}/${ICON_NAME}-icon-partial.plist"
 rm -f "${ICON_PARTIAL_INFO}"
 printf 'Compiling %s…\n' "${ICON_SOURCE}"
 if ! "${ACTOOL_BIN}" \
@@ -159,8 +191,8 @@ plutil -lint "${INFO_PLIST_PATH}" >/dev/null
 [[ "$(plutil -extract LSUIElement raw -o - "${INFO_PLIST_PATH}")" == true ]] \
   || die "LSUIElement must be true"
 
-codesign --force --sign - "${APP_PATH}" >/dev/null
-codesign --verify --deep --strict --verbose=2 "${APP_PATH}" >/dev/null
+codesign --force --sign - "${STAGING_APP_PATH}" >/dev/null
+codesign --verify --deep --strict --verbose=2 "${STAGING_APP_PATH}" >/dev/null
 [[ -x "${MACOS_PATH}/dopa-ui" ]] || die "missing executable dopa-ui in bundle"
 codesign --verify --strict --verbose=2 "${MACOS_PATH}/dopa-ui" >/dev/null
 if (( ! fixture )); then
@@ -172,10 +204,25 @@ if (( ! fixture )); then
   done
 fi
 
+# Keep a recoverable previous bundle until the verified staging bundle has
+# reached the final path. The lock prevents concurrent publishers; a failed
+# second rename restores the previous bundle before this script returns.
+if [[ -e "${APP_PATH}" || -L "${APP_PATH}" ]]; then
+  mv "${APP_PATH}" "${BACKUP_APP_PATH}"
+  had_previous_app=1
+fi
+if ! mv "${STAGING_APP_PATH}" "${APP_PATH}"; then
+  die "could not publish ${APP_PATH}"
+fi
+if (( had_previous_app )); then
+  rm -rf "${BACKUP_APP_PATH}"
+fi
+trap - EXIT
+
 printf 'Created %s\n' "${APP_PATH}"
-printf 'Executable: %s\n' "${MACOS_PATH}/dopa-ui"
+printf 'Executable: %s\n' "${APP_PATH}/Contents/MacOS/dopa-ui"
 if (( ! fixture )); then
-  printf 'CLI: %s\n' "${HELPERS_PATH}/dopa"
-  printf 'Daemon: %s\n' "${HELPERS_PATH}/dopa-daemon"
+  printf 'CLI: %s\n' "${APP_PATH}/Contents/Helpers/dopa"
+  printf 'Daemon: %s\n' "${APP_PATH}/Contents/Helpers/dopa-daemon"
 fi
 printf 'Bundle ID: %s\n' "${BUNDLE_IDENTIFIER}"

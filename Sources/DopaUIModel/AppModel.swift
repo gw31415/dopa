@@ -26,6 +26,10 @@ public final class AppModel {
   @ObservationIgnored private let authorize: @Sendable () async throws -> ManagementCredential
   @ObservationIgnored private var monitoring: Task<Void, Never>?
   @ObservationIgnored private var ticking: Task<Void, Never>?
+  @ObservationIgnored private var transportCloseTask: (id: UInt64, task: Task<Void, Never>)?
+  @ObservationIgnored private var nextTransportCloseID: UInt64 = 0
+  @ObservationIgnored private var transportConnectInFlight = false
+  @ObservationIgnored private var transportConnectWaiters: [CheckedContinuation<Void, Never>] = []
   @ObservationIgnored private var shuttingDown = false
   @ObservationIgnored private var connectionGeneration: UInt64 = 0
   @ObservationIgnored private var revisionFloor: (instance: String, revision: String)?
@@ -76,17 +80,25 @@ public final class AppModel {
     monitoring = Task { [weak self] in
       while !Task.isCancelled {
         guard let self, !self.shuttingDown else { return }
+        // Delivery is push-driven: a connected poll blocks in the transport
+        // until events arrive (or an interrupt/disconnect releases it), so a
+        // successful iteration re-polls immediately with no cadence sleep.
+        // connectOnce()/pollCycle() apply their own generation-pinned failure
+        // transition before rethrowing; this loop only selects the next cadence.
+        var repoll = false
         if !self.busy {
           if self.connectionState != .connected {
             do {
               try await self.connectOnce()
-            } catch { await self.disconnected(error) }
+              repoll = true
+            } catch {}
           } else {
             do {
-              try await self.pollOnce()
-            } catch { await self.disconnected(error) }
+              repoll = try await self.pollCycle()
+            } catch {}
           }
         }
+        if repoll { continue }
         let delay: UInt64
         if self.connectionState != .connected { delay = 3_000_000_000 }
         else if self.presentationActive || self.ownSessionID != nil { delay = 250_000_000 }
@@ -94,13 +106,50 @@ public final class AppModel {
         try? await Task.sleep(nanoseconds: delay)
       }
     }
+    wakeTicker()
+  }
+
+  /// How long the ticker rests. Visible panels tick every second for display.
+  /// Hidden panels rest: 30s with nothing to enforce, or a cancellable wait
+  /// toward a finite deadline. The deadline wait is wall-anchored in bounded
+  /// chunks: a forward clock jump is observed at the next chunk boundary
+  /// (within the previous 1s cadence), a backward jump correctly
+  /// extends the wait, and edits wake the ticker explicitly.
+  enum ClockWait: Equatable {
+    case interval(UInt64)
+    case wallUntil(Date)
+  }
+
+  func clockWait() -> ClockWait {
+    if presentationActive { return .interval(1_000_000_000) }
+    guard ownSessionID != nil else { return .interval(30_000_000_000) }
+    if let deadline = schedule.deadline { return .wallUntil(deadline) }
+    return .interval(30_000_000_000)
+  }
+
+  private func wakeTicker() {
+    guard !shuttingDown else { return }
+    ticking?.cancel()
     ticking = Task { [weak self] in
       while !Task.isCancelled {
         guard let self, !self.shuttingDown else { return }
-        await self.processClockTick(at: Date())
-        let delay: UInt64 = self.presentationActive || self.ownSessionID != nil
-          ? 1_000_000_000 : 5_000_000_000
-        try? await Task.sleep(nanoseconds: delay)
+        switch self.clockWait() {
+        case .interval(let nanos):
+          await self.processClockTick(at: Date())
+          try? await Task.sleep(nanoseconds: nanos)
+        case .wallUntil(let deadline):
+          let remaining = deadline.timeIntervalSinceNow
+          if remaining <= 0 {
+            await self.processClockTick(at: Date())
+            // Enforcement may have been deferred (busy); retry at the
+            // previous owned-session cadence instead of spinning.
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+          } else if remaining > 1 {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+          } else {
+            try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+          }
+        }
       }
     }
   }
@@ -108,6 +157,7 @@ public final class AppModel {
   public func setPresentationActive(_ active: Bool) {
     presentationActive = active
     if active { now = Date() }
+    wakeTicker()
   }
 
   func processClockTick(at date: Date) async {
@@ -121,12 +171,43 @@ public final class AppModel {
   }
 
   public func connectOnce() async throws {
+    // Public callers and the monitoring loop can overlap while the transport
+    // handshake is suspended. Serialize each attempt so an older completion
+    // can never invalidate or close a connection installed by a newer one,
+    // while preserving the public method's one-attempt-per-call behavior.
+    await acquireTransportConnectPermit()
+    defer { releaseTransportConnectPermit() }
+    try await performConnectOnce()
+  }
+
+  private func performConnectOnce() async throws {
+    // A previous failure may still be closing the shared transport. Waiting
+    // here prevents that old close from landing on the connection below.
+    await waitForTransportClose()
+    guard !shuttingDown else { throw CancellationError() }
     if let ownSessionID { cleanupUnconfirmed = true; pendingCleanupIDs.insert(ownSessionID) }
     ownSessionID = nil
     if schedule.running { schedule.stop() }
     revisionFloor = nil
-    let handshake = try await transport.connect()
-    guard !shuttingDown else { return }
+    let generation = connectionGeneration
+    let handshake: DaemonHandshake
+    do {
+      handshake = try await transport.connect()
+    } catch {
+      // Handle the failure while this attempt still owns the connect permit.
+      // This caller may have waited behind an earlier successful attempt. The
+      // generation captured after acquiring the permit therefore identifies
+      // the connection this attempt replaced.
+      await disconnectIfCurrent(error, generation: generation)
+      throw error
+    }
+    guard !shuttingDown, generation == connectionGeneration else {
+      // A close may have completed before a transport finished constructing
+      // its connection. Close once more after the late handshake so shutdown
+      // and disconnect remain final for every transport implementation.
+      await closeTransportAfterPendingClose()
+      throw CancellationError()
+    }
     capabilities = handshake.capabilities
     connectionState = .connected
     connectionGeneration &+= 1
@@ -134,15 +215,29 @@ public final class AppModel {
   }
 
   public func pollOnce() async throws {
-    do { for event in try await transport.poll() { try accept(event) } }
-    catch { await disconnected(error); throw error }
+    _ = try await pollCycle()
+  }
+
+  @discardableResult
+  private func pollCycle() async throws -> Bool {
+    let generation = connectionGeneration
+    do {
+      let events = try await transport.poll()
+      for event in events { try accept(event) }
+      return !events.isEmpty
+    }
+    catch { await disconnectIfCurrent(error, generation: generation); throw error }
   }
 
   public func advanceClock(to date: Date) async {
-    now = date
-    if !busy, ownSessionID != nil, let deadline = schedule.deadline, deadline <= now {
-      await stop()
-    }
+    // Publish `now` only where time is consumed: visible panels (countdown
+    // display and validation) and deadline enforcement. A hidden panel with
+    // a future deadline needs neither, so skip the assignment instead of
+    // publishing @Observable churn every tick. Enforcement still observes
+    // the passed deadline below.
+    let enforcing = !busy && ownSessionID != nil && schedule.deadline.map({ $0 <= date }) == true
+    if presentationActive || enforcing { now = date }
+    if enforcing { await stop() }
   }
 
   private func accept(_ next: DaemonSnapshot) {
@@ -152,13 +247,23 @@ public final class AppModel {
       guard next.isAtLeastAsNew(as: previous) else { return }
       if next.instanceID != previous.instanceID { ownSessionID = nil; schedule.stop() }
     }
+    // Steady-state polls often deliver a snapshot identical to the published one;
+    // equal content makes every step below rewrite the same values, so skip the
+    // reassignment instead of causing @Observable churn on each 1 Hz poll. A
+    // cleanup awaiting confirmation must still run the clearing check below:
+    // pendingCleanupIDs can be empty while cleanupUnconfirmed is true (a failed
+    // session.acquire), so only the fully settled state may return early.
+    if let previous = snapshot, previous == next, pendingCleanupIDs.isEmpty, !cleanupUnconfirmed {
+      return
+    }
     snapshot = next
     if let ownSessionID {
       if let own = next.sessions.first(where: { $0.id == ownSessionID }) { options = own.options }
       else { self.ownSessionID = nil; schedule.stop() }
     }
     if ownSessionID == nil && next.isConfirmed,
-      pendingCleanupIDs.isDisjoint(with: next.sessions.map(\.id)) {
+      pendingCleanupIDs.isEmpty
+        || pendingCleanupIDs.isDisjoint(with: next.sessions.lazy.map(\.id)) {
       pendingCleanupIDs = []
       cleanupUnconfirmed = false
     }
@@ -190,7 +295,25 @@ public final class AppModel {
     }
   }
 
+  private func disconnectIfCurrent(_ error: Error, generation: UInt64) async {
+    // A failure that started before a reconnect (or a second handling of the
+    // same failure) must not close the newer transport. The generation is
+    // bumped by every applied disconnect and every successful connect, so an
+    // older generation proves this failure is stale. Late wakeups after
+    // shutdown started are dropped the same way.
+    guard generation == connectionGeneration, !shuttingDown else { return }
+    await disconnected(error)
+  }
+
   private func disconnected(_ error: Error) async {
+    // Concurrent operations can report the same disconnect after this episode's
+    // transition was already applied. Keep the message current and the transport
+    // closed without bumping connectionGeneration a second time.
+    if connectionState == .disconnected, snapshot == nil, ownSessionID == nil {
+      message = "サービスに接続できません。dopa-daemonの導入・起動を確認してください。\n\(error)"
+      await closeTransport()
+      return
+    }
     if let ownSessionID { cleanupUnconfirmed = true; pendingCleanupIDs.insert(ownSessionID) }
     connectionGeneration &+= 1
     connectionState = .disconnected
@@ -199,7 +322,63 @@ public final class AppModel {
     capabilities = []
     if schedule.running { schedule.stop() }
     message = "サービスに接続できません。dopa-daemonの導入・起動を確認してください。\n\(error)"
-    await transport.close()
+    await closeTransport()
+  }
+
+  /// Coalesces concurrent close requests and exposes their completion to
+  /// reconnect attempts. The id keeps a waiter from clearing a newer close.
+  private func waitForTransportClose() async {
+    guard let closing = transportCloseTask else { return }
+    await closing.task.value
+    if transportCloseTask?.id == closing.id { transportCloseTask = nil }
+  }
+
+  private func closeTransport() async {
+    if transportCloseTask == nil {
+      nextTransportCloseID &+= 1
+      let id = nextTransportCloseID
+      let transport = self.transport
+      transportCloseTask = (id, Task { await transport.close() })
+    }
+    await waitForTransportClose()
+  }
+
+  /// A transport is allowed to suspend in `close()`. If a nonstandard
+  /// implementation finishes a concurrent handshake after that close took
+  /// its internal connection snapshot, coalescing with the pending close is
+  /// insufficient. Wait for it, then issue a close that is known to start
+  /// after the late handshake completed.
+  private func closeTransportAfterPendingClose() async {
+    await waitForTransportClose()
+    await closeTransport()
+  }
+
+  private func acquireTransportConnectPermit() async {
+    if !transportConnectInFlight {
+      transportConnectInFlight = true
+      return
+    }
+    await withCheckedContinuation { continuation in
+      transportConnectWaiters.append(continuation)
+    }
+  }
+
+  private func releaseTransportConnectPermit() {
+    guard !transportConnectWaiters.isEmpty else {
+      transportConnectInFlight = false
+      return
+    }
+    let next = transportConnectWaiters.removeFirst()
+    next.resume()
+  }
+
+  /// Waits for the connect attempt that was active when this call joined the
+  /// FIFO, plus every waiter already ahead of it. Shutdown first closes the
+  /// transport to release a suspended handshake, then joins here so any late
+  /// handshake cleanup (including its final close) finishes before returning.
+  private func waitForTransportConnects() async {
+    await acquireTransportConnectPermit()
+    releaseTransportConnectPermit()
   }
 
   private func recordMutation(_ response: JSONValue) throws {
@@ -258,6 +437,9 @@ public final class AppModel {
         schedule.stop()
         message = "指定した終了時刻を過ぎました。時刻を設定し直してください。"
       }
+      // A new owned schedule may carry a finite deadline the sleeping ticker
+      // has not seen yet; wake it so enforcement starts from now.
+      wakeTicker()
       try await refresh()
     } catch { await report(error) }
   }
@@ -296,13 +478,17 @@ public final class AppModel {
   public func stopSessions(_ ids: [String]) async {
     guard !busy, !authorizing, !ids.isEmpty else { return }
     if ids.count == 1, ids.first == ownSessionID { await stop(); return }
-    let requested = sessions.filter { ids.contains($0.id) }
+    // Membership lookups use a set for the local filter only; the request keeps
+    // the caller's ID order and contents, so daemon-side validation
+    // (1–32, distinct, full rejection) sees an unchanged payload.
+    let requestedIDs = Set(ids)
+    let requested = sessions.filter { requestedIDs.contains($0.id) }
     if capabilities.contains("session.stopSessions"), connectionState == .connected,
       requested.allSatisfy({ $0.peerUID == currentUID }) {
       busy = true
       defer { busy = false }
       do {
-        if let ownSessionID, ids.contains(ownSessionID) {
+        if let ownSessionID, requestedIDs.contains(ownSessionID) {
           cleanupUnconfirmed = true; pendingCleanupIDs.insert(ownSessionID)
         }
         let result = try await transport.request(method: "session.stopSessions", params: .object([
@@ -327,7 +513,7 @@ public final class AppModel {
       guard !busy else { message = "ほかの操作が完了してから停止してください。"; return }
       busy = true
       defer { busy = false }
-      if let ownSessionID, ids.contains(ownSessionID) {
+      if let ownSessionID, requestedIDs.contains(ownSessionID) {
         cleanupUnconfirmed = true; pendingCleanupIDs.insert(ownSessionID)
       }
       let result = try await transport.request(method: "admin.stopSessions", params: .object([
@@ -348,11 +534,16 @@ public final class AppModel {
   public func cancelEdit() { schedule.cancel() }
   public func applyEdit() {
     now = Date()
-    do { try schedule.confirm(now: now) }
+    do {
+      try schedule.confirm(now: now)
+      wakeTicker()
+    }
     catch { message = String(describing: error) }
   }
   public func setUnlimited(_ enabled: Bool) { schedule.setUnlimited(enabled, now: Date()) }
-  public func addTime(_ seconds: Int) { _ = schedule.addTime(seconds, now: Date()) }
+  public func addTime(_ seconds: Int) {
+    if schedule.addTime(seconds, now: Date()) { wakeTicker() }
+  }
 
   public func shutdown() async -> Bool {
     guard !busy else { message = "操作が完了してから終了してください。"; return false }
@@ -364,10 +555,13 @@ public final class AppModel {
       message = "自分のセッションの停止・復元をまだ確認できません。サービスの接続と状態を確認してください。"
       return false
     }
+    // Flag first: a poll blocked in the transport is released by close()
+    // below, and its late failure must not disconnect afterwards.
     shuttingDown = true
     monitoring?.cancel()
     ticking?.cancel()
-    await transport.close()
+    await closeTransport()
+    await waitForTransportConnects()
     return true
   }
 }

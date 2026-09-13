@@ -25,6 +25,80 @@ final class ManagementTests: XCTestCase {
     }
   }
 
+  private final class BlockingRunner: CommandRunner, @unchecked Sendable {
+    private let condition = NSCondition()
+    private var calls: [FakeRunner.Call] = []
+    private var blockNextBootout = false
+    private var bootoutIsBlocked = false
+    private var releaseBootout = false
+
+    func run(executable: String, arguments: [String]) throws -> CommandResult {
+      condition.lock()
+      calls.append(FakeRunner.Call(executable: executable, arguments: arguments))
+      if blockNextBootout && arguments.first == "bootout" {
+        blockNextBootout = false
+        bootoutIsBlocked = true
+        condition.broadcast()
+        while !releaseBootout { condition.wait() }
+      }
+      condition.unlock()
+      return CommandResult(status: 0)
+    }
+
+    func resetAndBlockNextBootout() {
+      condition.lock()
+      calls.removeAll()
+      blockNextBootout = true
+      bootoutIsBlocked = false
+      releaseBootout = false
+      condition.unlock()
+    }
+
+    func waitUntilBootoutIsBlocked(timeout: TimeInterval) -> Bool {
+      condition.lock()
+      defer { condition.unlock() }
+      let deadline = Date().addingTimeInterval(timeout)
+      while !bootoutIsBlocked {
+        if !condition.wait(until: deadline) { return false }
+      }
+      return true
+    }
+
+    func releaseBlockedBootout() {
+      condition.lock()
+      releaseBootout = true
+      condition.broadcast()
+      condition.unlock()
+    }
+
+    var callCount: Int {
+      condition.lock()
+      defer { condition.unlock() }
+      return calls.count
+    }
+  }
+
+  private final class ErrorBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Error?
+
+    func capture(_ body: () throws -> Void) {
+      do {
+        try body()
+      } catch {
+        lock.lock()
+        stored = error
+        lock.unlock()
+      }
+    }
+
+    var error: Error? {
+      lock.lock()
+      defer { lock.unlock() }
+      return stored
+    }
+  }
+
   private struct Fixture {
     let root: URL
     let layout: DaemonLayout
@@ -45,6 +119,18 @@ final class ManagementTests: XCTestCase {
     func remove() { try? FileManager.default.removeItem(at: root) }
   }
 
+  private func executableBytes(size: Int, seed: UInt64) -> Data {
+    var bytes = Data(count: size)
+    bytes.withUnsafeMutableBytes { raw in
+      var state = seed
+      for index in 0..<raw.count {
+        state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+        raw[index] = UInt8(truncatingIfNeeded: (state >> 33) ^ UInt64(index))
+      }
+    }
+    return bytes
+  }
+
   private func manager(
     _ fixture: Fixture,
     runner: FakeRunner,
@@ -57,6 +143,22 @@ final class ManagementTests: XCTestCase {
       shutdownRequester: { _ in shutdownCount?.value += 1 },
       readinessChecker: readiness,
       requireRoot: false)
+  }
+
+  private func legacyLayout(for fixture: Fixture) -> DaemonLayout {
+    DaemonLayout(
+      serviceLabel: "dev.dopa.daemon.test",
+      plistPath: fixture.root.appendingPathComponent(
+        "LaunchDaemons/dev.dopa.daemon.plist"
+      ).path,
+      executablePath: fixture.root.appendingPathComponent(
+        "PrivilegedHelperTools/dev.dopa.daemon"
+      ).path,
+      configPath: fixture.layout.configPath,
+      statePath: fixture.layout.statePath,
+      socketPath: fixture.layout.socketPath,
+      expectedOwnerUID: geteuid(),
+      expectedGroupGID: getegid())
   }
 
   func testSystemRuntimeAncestorAcceptsOnlyStandardMacOSMetadata() throws {
@@ -171,6 +273,24 @@ final class ManagementTests: XCTestCase {
       runner.calls.filter { $0.arguments.first == "bootout" }.count >= 2)
   }
 
+  func testInstallPreservesLargeExecutableByteIdentical() throws {
+    // A multi-megabyte executable exercises bounded-memory staging
+    // and atomic destination writes. It must install byte-identical with no
+    // new size limit, keeping executable permissions.
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let runner = FakeRunner()
+    let installer = manager(fixture, runner: runner)
+    let bytes = executableBytes(size: 5 * 1024 * 1024, seed: 0x1234_5678_9ABC_DEF0)
+    let largeSource = fixture.root.appendingPathComponent("dopa-daemon-large")
+    try bytes.write(to: largeSource)
+    XCTAssertEqual(chmod(largeSource.path, 0o755), 0)
+    try installer.install(executableURL: largeSource, user: String(geteuid()))
+    XCTAssertEqual(
+      try Data(contentsOf: URL(fileURLWithPath: fixture.layout.executablePath)), bytes)
+    XCTAssertEqual(access(fixture.layout.executablePath, X_OK), 0)
+  }
+
   func testUpdateBootstrapFailureRestoresPreviousInstallation() throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
@@ -199,20 +319,101 @@ final class ManagementTests: XCTestCase {
     XCTAssertEqual(shutdowns.value, 2, "new service cleanup must be confirmed before rollback")
   }
 
+  func testLargeExistingUpdateRollbackPreservesBytesAndCleansTemporaryFiles() throws {
+    // An update must retain a byte-identical rollback image even when the
+    // replacement is large. The manager stages the replacement with a bounded
+    // buffer, so this path does not need a second full Data allocation for the
+    // new executable.
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let runner = FakeRunner()
+    let shutdowns = Counter()
+    let installer = manager(fixture, runner: runner, shutdownCount: shutdowns)
+    let oldBytes = executableBytes(size: 5 * 1024 * 1024, seed: 0x11)
+    let oldSource = fixture.root.appendingPathComponent("dopa-daemon-source-old")
+    try oldBytes.write(to: oldSource)
+    XCTAssertEqual(chmod(oldSource.path, 0o755), 0)
+    try installer.install(executableURL: oldSource, user: String(geteuid()))
+
+    let newBytes = executableBytes(size: 5 * 1024 * 1024, seed: 0x22)
+    let newSource = fixture.root.appendingPathComponent("dopa-daemon-source-new")
+    try newBytes.write(to: newSource)
+    XCTAssertEqual(chmod(newSource.path, 0o755), 0)
+    // Existing bootout, failed new bootstrap, rollback bootout, old bootstrap.
+    runner.results = [
+      CommandResult(status: 0), CommandResult(status: 17),
+      CommandResult(status: 0), CommandResult(status: 0),
+    ]
+
+    XCTAssertThrowsError(try installer.install(executableURL: newSource))
+    XCTAssertEqual(
+      try Data(contentsOf: URL(fileURLWithPath: fixture.layout.executablePath)), oldBytes)
+    XCTAssertFalse(
+      try FileManager.default.contentsOfDirectory(
+        at: URL(fileURLWithPath: fixture.layout.executablePath).deletingLastPathComponent(),
+        includingPropertiesForKeys: nil
+      ).contains { $0.lastPathComponent.contains(".tmp-") })
+    XCTAssertFalse(
+      try FileManager.default.contentsOfDirectory(
+        at: URL(fileURLWithPath: fixture.layout.plistPath).deletingLastPathComponent(),
+        includingPropertiesForKeys: nil
+      ).contains { $0.lastPathComponent.contains(".tmp-") })
+    XCTAssertFalse(
+      try FileManager.default.contentsOfDirectory(atPath: fixture.layout.statePath)
+        .contains { $0.hasPrefix(".candidate-") })
+    XCTAssertEqual(shutdowns.value, 2)
+  }
+
+  func testUpdatePublishesFullyStagedCandidateWhenSourceChangesDuringShutdown() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let runner = FakeRunner()
+    try manager(fixture, runner: runner).install(
+      executableURL: fixture.source, user: String(geteuid()))
+
+    let candidate = Data("candidate-before-service-stop".utf8)
+    let mutation = Data("source-mutated-during-stop".utf8)
+    let updateSource = fixture.root.appendingPathComponent("dopa-daemon-update-source")
+    try candidate.write(to: updateSource)
+    XCTAssertEqual(chmod(updateSource.path, 0o755), 0)
+    let updater = DaemonManager(
+      layout: fixture.layout,
+      commandRunner: runner,
+      shutdownRequester: { _ in
+        let fd = open(updateSource.path, O_WRONLY | O_TRUNC | O_CLOEXEC)
+        guard fd >= 0 else {
+          throw DaemonManagementError.commandFailed("cannot mutate source fixture")
+        }
+        defer { close(fd) }
+        try mutation.withUnsafeBytes { bytes in
+          var written = 0
+          while written < bytes.count {
+            let count = Darwin.write(
+              fd, bytes.baseAddress!.advanced(by: written), bytes.count - written)
+            guard count > 0 else {
+              throw DaemonManagementError.commandFailed("cannot mutate source fixture")
+            }
+            written += count
+          }
+        }
+      },
+      readinessChecker: { _ in true },
+      requireRoot: false)
+
+    try updater.install(executableURL: updateSource)
+
+    XCTAssertEqual(
+      try Data(contentsOf: URL(fileURLWithPath: fixture.layout.executablePath)), candidate)
+    XCTAssertEqual(try Data(contentsOf: updateSource), mutation)
+    XCTAssertFalse(
+      try FileManager.default.contentsOfDirectory(atPath: fixture.layout.statePath)
+        .contains { $0.hasPrefix(".candidate-") })
+  }
+
   func testLegacyServiceIdentityIsReplacedAndConfiguredUserIsPreserved() throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
-    let legacyLayout = DaemonLayout(
-      serviceLabel: "dev.dopa.daemon.test",
-      plistPath: fixture.root.appendingPathComponent(
-        "LaunchDaemons/dev.dopa.daemon.plist").path,
-      executablePath: fixture.root.appendingPathComponent(
-        "PrivilegedHelperTools/dev.dopa.daemon").path,
-      configPath: fixture.layout.configPath,
-      statePath: fixture.layout.statePath,
-      socketPath: fixture.layout.socketPath,
-      expectedOwnerUID: geteuid(),
-      expectedGroupGID: getegid())
+    let legacyLayout = legacyLayout(for: fixture)
     let runner = FakeRunner()
     let shutdowns = Counter()
     let legacyManager = DaemonManager(
@@ -246,6 +447,155 @@ final class ManagementTests: XCTestCase {
         ["bootout", legacyLayout.serviceTarget],
         ["bootstrap", "system", fixture.layout.plistPath],
       ])
+  }
+
+  func testFailedLegacyMigrationRestoresExactIdentityAndWaitsUntilReady() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let legacyLayout = legacyLayout(for: fixture)
+    let runner = FakeRunner()
+    let shutdowns = Counter()
+    var readinessChecks = 0
+    let legacyManager = DaemonManager(
+      layout: legacyLayout,
+      commandRunner: runner,
+      shutdownRequester: { _ in shutdowns.value += 1 },
+      readinessChecker: { _ in true },
+      requireRoot: false)
+    try legacyManager.install(
+      executableURL: fixture.source, user: String(geteuid()))
+
+    let legacyPlistURL = URL(fileURLWithPath: legacyLayout.plistPath)
+    var markedPlist = try String(contentsOf: legacyPlistURL, encoding: .utf8)
+    markedPlist = markedPlist.replacingOccurrences(
+      of: "<plist version=\"1.0\">",
+      with: "<!-- preserve this legacy plist byte-for-byte -->\n<plist version=\"1.0\">")
+    try Data(markedPlist.utf8).write(to: legacyPlistURL)
+    XCTAssertEqual(chmod(legacyLayout.plistPath, 0o644), 0)
+    XCTAssertEqual(chown(legacyLayout.plistPath, geteuid(), getegid()), 0)
+    let markedConfig = Data(
+      "{ \"allowedUID\" : \(geteuid()), \"version\" : 1 }\n".utf8)
+    try markedConfig.write(to: URL(fileURLWithPath: legacyLayout.configPath))
+    XCTAssertEqual(chmod(legacyLayout.configPath, 0o600), 0)
+    XCTAssertEqual(chown(legacyLayout.configPath, geteuid(), getegid()), 0)
+
+    let legacyExecutable = try Data(
+      contentsOf: URL(fileURLWithPath: legacyLayout.executablePath))
+    let legacyPlist = try Data(contentsOf: legacyPlistURL)
+    let legacyConfig = try Data(contentsOf: URL(fileURLWithPath: legacyLayout.configPath))
+    let replacement = fixture.root.appendingPathComponent("replacement-daemon")
+    try Data("replacement-must-not-become-legacy".utf8).write(to: replacement)
+    XCTAssertEqual(chmod(replacement.path, 0o755), 0)
+
+    runner.calls.removeAll()
+    readinessChecks = 0
+    runner.results = [
+      CommandResult(status: 0),
+      CommandResult(status: 17, stderr: "new identity bootstrap failed"),
+      CommandResult(status: 0),
+      CommandResult(status: 0),
+    ]
+    let currentManager = DaemonManager(
+      layout: fixture.layout,
+      commandRunner: runner,
+      shutdownRequester: { _ in shutdowns.value += 1 },
+      readinessChecker: { _ in
+        readinessChecks += 1
+        return true
+      },
+      requireRoot: false)
+
+    XCTAssertThrowsError(
+      try currentManager.installReplacingLegacy(
+        executableURL: replacement, legacyLayout: legacyLayout, environment: [:])
+    ) {
+      guard case .commandFailed = ($0 as? DaemonManagementError) else {
+        return XCTFail("expected original bootstrap error, got \($0)")
+      }
+    }
+
+    XCTAssertEqual(
+      try Data(contentsOf: URL(fileURLWithPath: legacyLayout.executablePath)),
+      legacyExecutable)
+    XCTAssertEqual(try Data(contentsOf: legacyPlistURL), legacyPlist)
+    XCTAssertEqual(
+      try Data(contentsOf: URL(fileURLWithPath: legacyLayout.configPath)), legacyConfig)
+    for (path, expectedMode) in [
+      (legacyLayout.executablePath, mode_t(0o755)),
+      (legacyLayout.plistPath, mode_t(0o644)),
+      (legacyLayout.configPath, mode_t(0o600)),
+    ] {
+      var info = stat()
+      XCTAssertEqual(lstat(path, &info), 0)
+      XCTAssertEqual(info.st_mode & 0o7777, expectedMode)
+      XCTAssertEqual(info.st_uid, geteuid())
+      XCTAssertEqual(info.st_gid, getegid())
+    }
+    XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.layout.executablePath))
+    XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.layout.plistPath))
+    XCTAssertEqual(readinessChecks, 1, "restored legacy service must pass readiness")
+    XCTAssertEqual(
+      runner.calls.map(\.arguments),
+      [
+        ["bootout", legacyLayout.serviceTarget],
+        ["bootstrap", "system", fixture.layout.plistPath],
+        ["bootout", fixture.layout.serviceTarget],
+        ["bootstrap", "system", legacyLayout.plistPath],
+      ])
+  }
+
+  func testLegacyMigrationSerializesConcurrentLifecycleOperations() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let legacyLayout = legacyLayout(for: fixture)
+    let runner = BlockingRunner()
+    let legacyManager = DaemonManager(
+      layout: legacyLayout,
+      commandRunner: runner,
+      shutdownRequester: { _ in },
+      readinessChecker: { _ in true },
+      requireRoot: false)
+    try legacyManager.install(
+      executableURL: fixture.source, user: String(geteuid()))
+    runner.resetAndBlockNextBootout()
+
+    let currentManager = DaemonManager(
+      layout: fixture.layout,
+      commandRunner: runner,
+      shutdownRequester: { _ in },
+      readinessChecker: { _ in true },
+      requireRoot: false)
+    let migrationError = ErrorBox()
+    let lifecycleError = ErrorBox()
+    let group = DispatchGroup()
+    group.enter()
+    DispatchQueue.global().async {
+      defer { group.leave() }
+      migrationError.capture {
+        try currentManager.installReplacingLegacy(
+          executableURL: fixture.source, legacyLayout: legacyLayout, environment: [:])
+      }
+    }
+    XCTAssertTrue(runner.waitUntilBootoutIsBlocked(timeout: 2))
+
+    let lifecycleStarted = DispatchSemaphore(value: 0)
+    group.enter()
+    DispatchQueue.global().async {
+      defer { group.leave() }
+      lifecycleStarted.signal()
+      lifecycleError.capture { try currentManager.start() }
+    }
+    XCTAssertEqual(lifecycleStarted.wait(timeout: .now() + 1), .success)
+    usleep(100_000)
+    XCTAssertEqual(
+      runner.callCount, 1,
+      "a concurrent lifecycle command must not enter launchctl during migration")
+
+    runner.releaseBlockedBootout()
+    XCTAssertEqual(group.wait(timeout: .now() + 3), .success)
+    XCTAssertNil(migrationError.error)
+    XCTAssertNil(lifecycleError.error)
+    XCTAssertEqual(runner.callCount, 3)
   }
 
   func testFreshBootstrapFailureKeepsFilesWhenServiceCannotBeStopped() throws {

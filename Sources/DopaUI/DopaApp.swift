@@ -59,6 +59,7 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
   private var statusItem: NSStatusItem?
   private var statusActivityIndicator: NSProgressIndicator?
   private var popover: NSPopover?
+  var hasPopover: Bool { popover != nil }
   private var popoverInitialFocusView: PopoverInitialFocusView?
   private let daemonInstaller = DaemonInstaller()
   private var daemonManagementPromptActive = false
@@ -69,7 +70,7 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
   private var daemonStartupTransitionActive = false
   private var daemonStartupTransitionTimeoutTask: Task<Void, Never>?
   private var daemonInstalled = false
-  private var daemonInstallationMonitorTask: Task<Void, Never>?
+  private var installationWatcher: ManagedFileWatcher?
   private var quitKeyMonitor: Any?
   private var connectedSinceLaunch = false
   private var offeredStartupRecovery = false
@@ -184,6 +185,19 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
     ])
     statusActivityIndicator = activityIndicator
 
+    // The panel popover is built on first presentation (see ensurePopover),
+    // not here, so launching the app never pays for views the user may not
+    // open. Only construction is deferred: the built popover is kept for the
+    // app lifetime, and the model/connection/deadline objects never depend
+    // on view lifetime.
+    updateStatusItem()
+  }
+
+  /// Builds the status popover on first presentation and keeps it. Returning
+  /// the same instance preserves draft input, focus, tab order, scroll
+  /// position, and error display exactly as if built at launch.
+  func ensurePopover(for model: AppModel) -> NSPopover {
+    if let popover { return popover }
     let popover = NSPopover()
     popover.behavior = .transient
     popover.animates = true
@@ -203,8 +217,7 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
     popover.delegate = self
     popover.contentViewController = contentController
     self.popover = popover
-
-    updateStatusItem()
+    return popover
   }
 
   private func updateStatusItem() {
@@ -278,7 +291,8 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
       return
     }
 
-    guard let popover, let button = statusItem?.button else { return }
+    guard let button = statusItem?.button, let model = Self.model else { return }
+    let popover = ensurePopover(for: model)
     if popover.isShown {
       popover.performClose(sender)
     } else {
@@ -440,15 +454,21 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
   }
 
   private func beginDaemonInstallationMonitoring() {
-    daemonInstallationMonitorTask?.cancel()
-    daemonInstallationMonitorTask = Task { [weak self] in
-      while !Task.isCancelled {
-        do { try await Task.sleep(for: .milliseconds(500)) }
-        catch { return }
-        guard let self else { return }
-        refreshDaemonInstallationState()
+    installationWatcher?.stop()
+    // vnode events re-verify immediately; the watcher's bounded fallback tick
+    // covers missed events. Duplicate file/directory notifications are
+    // coalesced before one main-actor refresh, while the previous ~0.5s
+    // reflection bound remains intact.
+    let watcher = ManagedFileWatcher(files: daemonInstaller.managedFileURLs) {
+      [weak self] completed in
+      Task { @MainActor [weak self] in
+        defer { completed() }
+        self?.refreshDaemonInstallationState()
       }
     }
+    installationWatcher = watcher
+    watcher.start()
+    refreshDaemonInstallationState()
   }
 
   private func refreshDaemonInstallationState() {

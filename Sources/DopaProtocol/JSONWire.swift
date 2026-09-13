@@ -30,11 +30,20 @@ public enum JSONWire {
   ///
   /// The returned data always ends in exactly one LF. The LF is not counted
   /// toward the 64 KiB message limit.
+  ///
+  /// Validation runs before any output bytes are produced, so invalid input
+  /// keeps reporting its original error (nesting, non-finite numbers, and the
+  /// top-level object requirement) even when the message is also oversized.
+  /// Only valid-but-oversized input fails with `messageTooLarge`, which the
+  /// writer throws as soon as the byte count crosses the limit instead of
+  /// materializing the full oversized frame.
   public static func encode(_ value: JSONValue) throws -> Data {
     guard case .object = value else { throw JSONWireError.topLevelMustBeObject }
     try validate(value, depth: 0)
     var writer = JSONWriter()
-    writer.write(value)
+    try writer.write(value)
+    // The writer already throws on overflow; this guard documents and defends
+    // the frame limit at the boundary that owns it.
     guard writer.data.count <= maxMessageBytes else {
       throw JSONWireError.messageTooLarge
     }
@@ -85,7 +94,22 @@ public enum JSONWire {
 
 /// Accumulates arbitrary socket reads and emits complete NDJSON objects.
 public struct JSONLineBuffer: Sendable {
-  private var pending = Data()
+  // Optionality is intentional: assigning nil after a rare large frame drops
+  // Data's backing allocation instead of retaining it for the lifetime of an
+  // otherwise idle connection.
+  private var pending: Data? = Data()
+  /// Largest `pending.count` reached since the last buffer release. `Data`
+  /// exposes no `capacity` accessor on this toolchain, so this byte high-water
+  /// is the observable lower bound of the retained buffer storage.
+  private var peakPendingBytes = 0
+  // Common requests remain below this boundary. Frames at or above it release
+  // their backing storage once decoded, including near-limit frames that never
+  // reach the public 64 KiB maximum.
+  static let retainedBufferReleaseThreshold = JSONWire.maxMessageBytes / 2
+
+  // Internal observability for the memory-retention policy's regression tests.
+  var hasRetainedPendingStorage: Bool { pending != nil }
+  var retainedPendingHighWaterBytes: Int { peakPendingBytes }
 
   public init() {}
 
@@ -93,13 +117,24 @@ public struct JSONLineBuffer: Sendable {
     var values: [JSONValue] = []
     for byte in data {
       if byte == 0x0A {
-        guard !pending.isEmpty else { throw JSONWireError.invalidFrame }
-        values.append(try JSONWire.decode(pending))
-        pending.removeAll(keepingCapacity: true)
+        guard let frame = pending, !frame.isEmpty else { throw JSONWireError.invalidFrame }
+        // `pending.count` grows monotonically within a frame, so the peak only
+        // needs recording at frame completion (and at overflow below) instead
+        // of on every byte.
+        if frame.count > peakPendingBytes { peakPendingBytes = frame.count }
+        values.append(try JSONWire.decode(frame))
+        if peakPendingBytes >= Self.retainedBufferReleaseThreshold {
+          pending = nil
+          peakPendingBytes = 0
+        } else {
+          pending?.removeAll(keepingCapacity: true)
+        }
       } else {
         guard byte != 0x0D else { throw JSONWireError.invalidFrame }
-        pending.append(byte)
-        guard pending.count <= JSONWire.maxMessageBytes else {
+        if pending == nil { pending = Data() }
+        pending!.append(byte)
+        guard pending!.count <= JSONWire.maxMessageBytes else {
+          peakPendingBytes = pending!.count
           throw JSONWireError.messageTooLarge
         }
       }
@@ -111,63 +146,95 @@ public struct JSONLineBuffer: Sendable {
 private struct JSONWriter {
   var data = Data()
 
-  mutating func write(_ value: JSONValue) {
+  // Four lowercase hex digits per control scalar 0x00...0x1F, matching the
+  // "\u00xx" escape (without the leading backslash and 'u') that
+  // String(format: "%04x") produced. Precomputed so control escapes do not
+  // pay a Foundation format call per scalar.
+  private static let controlEscapeHex: [UInt8] = {
+    let hexDigits = Array("0123456789abcdef".utf8)
+    var table: [UInt8] = []
+    table.reserveCapacity(32 * 4)
+    for value in 0...31 {
+      table.append(0x30) // "0"
+      table.append(0x30) // "0"
+      table.append(hexDigits[(value >> 4) & 0xF])
+      table.append(hexDigits[value & 0xF])
+    }
+    return table
+  }()
+
+  mutating func write(_ value: JSONValue) throws {
     switch value {
     case .object(let object):
-      data.append(0x7B) // {
+      try append(0x7B) // {
       let keys = object.keys.sorted {
-        Array($0.utf8).lexicographicallyPrecedes(Array($1.utf8))
+        $0.utf8.lexicographicallyPrecedes($1.utf8)
       }
       for (index, key) in keys.enumerated() {
-        if index != 0 { data.append(0x2C) } // ,
-        write(string: key)
-        data.append(0x3A) // :
-        write(object[key]!)
+        if index != 0 { try append(0x2C) } // ,
+        try write(string: key)
+        try append(0x3A) // :
+        try write(object[key]!)
       }
-      data.append(0x7D) // }
+      try append(0x7D) // }
     case .array(let array):
-      data.append(0x5B) // [
+      try append(0x5B) // [
       for (index, element) in array.enumerated() {
-        if index != 0 { data.append(0x2C) }
-        write(element)
+        if index != 0 { try append(0x2C) }
+        try write(element)
       }
-      data.append(0x5D) // ]
+      try append(0x5D) // ]
     case .string(let string):
-      write(string: string)
+      try write(string: string)
     case .bool(let value):
-      data.append(contentsOf: value ? [0x74, 0x72, 0x75, 0x65] : [0x66, 0x61, 0x6C, 0x73, 0x65])
+      try append(contentsOf: value ? [0x74, 0x72, 0x75, 0x65] : [0x66, 0x61, 0x6C, 0x73, 0x65])
     case .number(let value):
       // JSONWire.encode validates this before appending the LF. Keeping the
       // fallback here avoids silently emitting invalid JSON if the writer is
       // reused in the future.
       if value.isFinite {
-        data.append(contentsOf: String(value).utf8)
+        try append(contentsOf: String(value).utf8)
       }
     case .null:
-      data.append(contentsOf: [0x6E, 0x75, 0x6C, 0x6C])
+      try append(contentsOf: [0x6E, 0x75, 0x6C, 0x6C])
     }
   }
 
-  mutating func write(string: String) {
-    data.append(0x22) // "
+  mutating func write(string: String) throws {
+    try append(0x22) // "
     for scalar in string.unicodeScalars {
       switch scalar.value {
-      case 0x22: data.append(contentsOf: [0x5C, 0x22])
-      case 0x5C: data.append(contentsOf: [0x5C, 0x5C])
-      case 0x08: data.append(contentsOf: [0x5C, 0x62])
-      case 0x0C: data.append(contentsOf: [0x5C, 0x66])
-      case 0x0A: data.append(contentsOf: [0x5C, 0x6E])
-      case 0x0D: data.append(contentsOf: [0x5C, 0x72])
-      case 0x09: data.append(contentsOf: [0x5C, 0x74])
+      case 0x22: try append(contentsOf: [0x5C, 0x22])
+      case 0x5C: try append(contentsOf: [0x5C, 0x5C])
+      case 0x08: try append(contentsOf: [0x5C, 0x62])
+      case 0x0C: try append(contentsOf: [0x5C, 0x66])
+      case 0x0A: try append(contentsOf: [0x5C, 0x6E])
+      case 0x0D: try append(contentsOf: [0x5C, 0x72])
+      case 0x09: try append(contentsOf: [0x5C, 0x74])
       case 0x00...0x1F:
-        let digits = Array(String(format: "%04x", scalar.value).utf8)
-        data.append(contentsOf: [0x5C, 0x75])
-        data.append(contentsOf: digits)
+        try append(contentsOf: [0x5C, 0x75])
+        let digits = Int(scalar.value) * 4
+        try append(contentsOf: Self.controlEscapeHex[digits..<(digits + 4)])
       default:
-        data.append(contentsOf: String(scalar).utf8)
+        try append(contentsOf: String(scalar).utf8)
       }
     }
-    data.append(0x22)
+    try append(0x22)
+  }
+
+  /// All frame bytes flow through these two entry points so output that would
+  /// exceed the 64 KiB message limit is rejected as soon as the count crosses
+  /// the limit, before the oversized frame is fully materialized. The largest
+  /// single append is one number's textual form, so `data` stays bounded just
+  /// past the limit instead of growing with the whole oversized message.
+  private mutating func append(_ byte: UInt8) throws {
+    data.append(byte)
+    if data.count > JSONWire.maxMessageBytes { throw JSONWireError.messageTooLarge }
+  }
+
+  private mutating func append<Bytes: Sequence>(contentsOf bytes: Bytes) throws where Bytes.Element == UInt8 {
+    data.append(contentsOf: bytes)
+    if data.count > JSONWire.maxMessageBytes { throw JSONWireError.messageTooLarge }
   }
 }
 

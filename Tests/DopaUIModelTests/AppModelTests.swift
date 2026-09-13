@@ -2,6 +2,7 @@ import DopaClient
 import DopaAuthorization
 import DopaProtocol
 import Foundation
+import Observation
 import XCTest
 
 @testable import DopaUIModel
@@ -9,6 +10,29 @@ import XCTest
 @available(macOS 14.0, *)
 @MainActor
 final class AppModelTests: XCTestCase {
+  func testIdenticalSnapshotDoesNotPublishObservationChange() async throws {
+    let idle = modelSnapshotJSON()
+    let transport = MockDaemonTransport(
+      handshake: DaemonHandshake(capabilities: [], snapshot: try DaemonSnapshot(idle)),
+      statusValue: idle)
+    let model = AppModel(transport: transport)
+    try await model.connectOnce()
+
+    let changed = expectation(description: "identical snapshot must not be republished")
+    changed.isInverted = true
+    withObservationTracking {
+      _ = model.snapshot
+    } onChange: {
+      changed.fulfill()
+    }
+    await transport.enqueue(.object([
+      "event": .string("status.changed"),
+      "data": .object(["snapshot": idle]),
+    ]))
+    try await model.pollOnce()
+    await fulfillment(of: [changed], timeout: 0.1)
+  }
+
   func testStartingDurationPublishesMatchingClockBeforeStatusRefreshCompletes() async throws {
     let idle = modelSnapshotJSON(phase: "idle")
     let running = modelSnapshotJSON(
@@ -36,6 +60,47 @@ final class AppModelTests: XCTestCase {
 
     await transport.releaseStatusGet()
     await startTask.value
+  }
+
+  func testClockDelayRestsOnlyWhenHiddenAndSessionless() async throws {
+    // Visible panels tick every second; hidden panels rest 30s without
+    // duties, or wait toward a finite deadline. processClockTick already
+    // returns early when hidden and sessionless, and setPresentationActive
+    // refreshes `now` on return.
+    let idle = modelSnapshotJSON(phase: "idle")
+    let transport = MockDaemonTransport(
+      handshake: DaemonHandshake(capabilities: [], snapshot: try DaemonSnapshot(idle)),
+      statusValue: idle)
+    let model = AppModel(transport: transport)
+    XCTAssertEqual(model.clockWait(), .interval(30_000_000_000))
+    model.setPresentationActive(true)
+    XCTAssertEqual(model.clockWait(), .interval(1_000_000_000))
+    model.setPresentationActive(false)
+    XCTAssertEqual(model.clockWait(), .interval(30_000_000_000))
+    try await model.connectOnce()
+    await model.start()
+    XCTAssertNotNil(model.ownSessionID)
+    // The default schedule starts finite, so the hidden ticker already waits
+    // wall-anchored instead of ticking.
+    guard case .wallUntil(let initial) = model.clockWait() else {
+      return XCTFail("started hidden session must wait wall-anchored")
+    }
+    XCTAssertGreaterThan(initial.timeIntervalSinceNow, 0)
+    model.editDuration("00:10:00")
+    model.applyEdit()
+    guard case .wallUntil(let deadline) = model.clockWait() else {
+      return XCTFail("finite hidden deadline must wait wall-anchored")
+    }
+    XCTAssertEqual(deadline.timeIntervalSinceNow, 600, accuracy: 30)
+    // Unlimited hidden ownership has no deadline to enforce: rest. Stopped
+    // unlimited mode applies immediately, so stop, switch, and start again.
+    await model.stop()
+    XCTAssertNil(model.ownSessionID)
+    model.setUnlimited(true)
+    await model.start()
+    XCTAssertNotNil(model.ownSessionID)
+    XCTAssertNil(model.schedule.deadline)
+    XCTAssertEqual(model.clockWait(), .interval(30_000_000_000))
   }
 
   func testApplyingDurationPublishesMatchingClockWithoutWaitingForTick() async throws {
@@ -307,6 +372,36 @@ final class AppModelTests: XCTestCase {
     model.setPresentationActive(false)
   }
 
+  func testHiddenClockSkipsDisplayChurnBeforeDeadline() async throws {
+    // A hidden panel with a future deadline publishes no `now` churn;
+    // becoming visible resumes publishing. Enforcement is unchanged.
+    let idle = modelSnapshotJSON(phase: "idle")
+    let running = modelSnapshotJSON(
+      revision: "3", phase: "active",
+      sessions: [modelSessionJSON(id: "own", clientName: "Dopa UI", pid: 2187)],
+      systemSleepDisabled: true)
+    let transport = MockDaemonTransport(
+      handshake: DaemonHandshake(capabilities: [], snapshot: try DaemonSnapshot(idle)),
+      statusValue: running)
+    let model = AppModel(transport: transport)
+    try await model.connectOnce()
+    await model.start()
+    let published = model.now
+    let deadline = try XCTUnwrap(model.schedule.deadline)
+
+    await model.advanceClock(to: deadline.addingTimeInterval(-10))
+
+    XCTAssertEqual(model.now, published)
+    XCTAssertEqual(model.ownSessionID, "own")
+
+    model.setPresentationActive(true)
+    let tick = deadline.addingTimeInterval(-5)
+    await model.advanceClock(to: tick)
+
+    XCTAssertEqual(model.now, tick)
+    model.setPresentationActive(false)
+  }
+
   func testStalePollSnapshotCannotClearOwnedIDAfterAcquire() async throws {
     let idle = modelSnapshotJSON(phase: "idle")
     let running = modelSnapshotJSON(
@@ -468,11 +563,23 @@ private actor MockDaemonTransport: DaemonTransport {
   private let handshake: DaemonHandshake
   private var statusValue: JSONValue
   private var events: [JSONValue] = []
+  private var pollCalls = 0
+  private var holdConnect = false
+  private var failingConnectAttempts: Set<Int> = []
+  private var connectStarted = false
+  private var connectStartWaiters: [CheckedContinuation<Void, Never>] = []
+  private var connectContinuations: [CheckedContinuation<Void, Never>] = []
+  private var emptyPollDelayNanoseconds: UInt64? = 20_000_000
   private var pollFailure: Failure?
   private var optionFailure = false
   private var releaseFailure = false
   private var requests: [Request] = []
   private var connects = 0
+  private var closes = 0
+  private var holdClose = false
+  private var closeStarted = false
+  private var closeWaiters: [CheckedContinuation<Void, Never>] = []
+  private var closeContinuation: CheckedContinuation<Void, Never>?
   private var holdPoll = false
   private var pollStarted = false
   private var pollStartWaiters: [CheckedContinuation<Void, Never>] = []
@@ -489,6 +596,17 @@ private actor MockDaemonTransport: DaemonTransport {
 
   func connect() async throws -> DaemonHandshake {
     connects += 1
+    let attempt = connects
+    if holdConnect {
+      connectStarted = true
+      let waiters = connectStartWaiters
+      connectStartWaiters.removeAll()
+      for waiter in waiters { waiter.resume() }
+      await withCheckedContinuation { continuation in
+        connectContinuations.append(continuation)
+      }
+    }
+    if failingConnectAttempts.remove(attempt) != nil { throw Failure.disconnected }
     return handshake
   }
 
@@ -526,6 +644,7 @@ private actor MockDaemonTransport: DaemonTransport {
   }
 
   func poll() async throws -> [JSONValue] {
+    pollCalls += 1
     if let pollFailure { throw pollFailure }
     if holdPoll {
       pollStarted = true
@@ -538,10 +657,27 @@ private actor MockDaemonTransport: DaemonTransport {
     }
     let next = events
     events.removeAll()
+    if next.isEmpty, let emptyPollDelayNanoseconds {
+      // Model the blocking production transport: an empty poll waits a
+      // moment instead of returning instantly, so monitoring-loop tests do
+      // not busy-spin while connected.
+      try await Task.sleep(nanoseconds: emptyPollDelayNanoseconds)
+    }
     return next
   }
 
-  func close() async {}
+  func close() async {
+    closes += 1
+    if holdClose {
+      closeStarted = true
+      let waiters = closeWaiters
+      closeWaiters.removeAll()
+      waiters.forEach { $0.resume() }
+      await withCheckedContinuation { continuation in
+        closeContinuation = continuation
+      }
+    }
+  }
 
   func setPollFailure(_ failure: Failure?) {
     pollFailure = failure
@@ -609,6 +745,133 @@ private actor MockDaemonTransport: DaemonTransport {
   func connectCount() -> Int {
     connects
   }
+
+  func setConnectHeld(_ held: Bool) {
+    holdConnect = held
+  }
+
+  func failConnect(attempt: Int) {
+    failingConnectAttempts.insert(attempt)
+  }
+
+  func waitUntilConnectStarted() async {
+    if connectStarted { return }
+    await withCheckedContinuation { continuation in
+      connectStartWaiters.append(continuation)
+    }
+  }
+
+  func releaseConnect() {
+    holdConnect = false
+    let continuations = connectContinuations
+    connectContinuations.removeAll()
+    for continuation in continuations { continuation.resume() }
+  }
+
+  func pollCount() -> Int { pollCalls }
+
+  func setEmptyPollDelayNanoseconds(_ value: UInt64?) {
+    emptyPollDelayNanoseconds = value
+  }
+
+  func closeCount() -> Int {
+    closes
+  }
+
+  func setCloseHeld(_ held: Bool) {
+    holdClose = held
+  }
+
+  func waitUntilCloseStarted() async {
+    if closeStarted { return }
+    await withCheckedContinuation { continuation in
+      closeWaiters.append(continuation)
+    }
+  }
+
+  func releaseClose() {
+    holdClose = false
+    guard let continuation = closeContinuation else { return }
+    closeContinuation = nil
+    continuation.resume()
+  }
+}
+
+/// Models a protocol-compatible transport whose first close snapshots its
+/// current connection, then suspends. A concurrent handshake can finish after
+/// that snapshot and install a new connection, so AppModel must close again
+/// after the pending close completes.
+private actor LateInstallingTransport: DaemonTransport {
+  private let handshake: DaemonHandshake
+  private var connectContinuation: CheckedContinuation<Void, Never>?
+  private var closeContinuations: [CheckedContinuation<Void, Never>] = []
+  private var connectStarted = false
+  private var connectWaiters: [CheckedContinuation<Void, Never>] = []
+  private var closeWaiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
+  private var connected = false
+  private var closes = 0
+
+  init(handshake: DaemonHandshake) {
+    self.handshake = handshake
+  }
+
+  func connect() async throws -> DaemonHandshake {
+    connectStarted = true
+    let waiters = connectWaiters
+    connectWaiters.removeAll()
+    for waiter in waiters { waiter.resume() }
+    await withCheckedContinuation { continuation in
+      connectContinuation = continuation
+    }
+    connected = true
+    return handshake
+  }
+
+  func request(method: String, params: JSONValue) async throws -> JSONValue {
+    guard connected else { throw MockDaemonTransport.Failure.disconnected }
+    return .object([:])
+  }
+
+  func poll() async throws -> [JSONValue] { [] }
+
+  func close() async {
+    closes += 1
+    // This assignment represents the connection snapshot taken by close.
+    // A handshake released below can install after it while this call waits.
+    connected = false
+    let ready = closeWaiters.filter { $0.count <= closes }
+    closeWaiters.removeAll { $0.count <= closes }
+    for waiter in ready { waiter.continuation.resume() }
+    await withCheckedContinuation { continuation in
+      closeContinuations.append(continuation)
+    }
+  }
+
+  func waitUntilConnectStarted() async {
+    if connectStarted { return }
+    await withCheckedContinuation { continuation in connectWaiters.append(continuation) }
+  }
+
+  func waitUntilCloseStarted(count: Int = 1) async {
+    if closes >= count { return }
+    await withCheckedContinuation { continuation in
+      closeWaiters.append((count, continuation))
+    }
+  }
+
+  func releaseConnect() {
+    let continuation = connectContinuation
+    connectContinuation = nil
+    continuation?.resume()
+  }
+
+  func releaseClose() {
+    guard !closeContinuations.isEmpty else { return }
+    closeContinuations.removeFirst().resume()
+  }
+
+  func isConnected() -> Bool { connected }
+  func closeCount() -> Int { closes }
 }
 
 private actor AuthorizationSuspension {
@@ -813,4 +1076,209 @@ extension AppModelTests {
     XCTAssertTrue(model.sessions.isEmpty)
     XCTAssertNil(model.message)
   }
+
+  func testMonitoringPollFailureClosesOnceAndReconnects() async throws {
+    // One poll failure must not close the transport twice (pollOnce's
+    // internal handling plus the monitoring loop's catch), and the stale
+    // handling must not close a transport that reconnected afterwards.
+    let idle = modelSnapshotJSON()
+    let transport = MockDaemonTransport(
+      handshake: DaemonHandshake(capabilities: [], snapshot: try DaemonSnapshot(idle)),
+      statusValue: idle)
+    let model = AppModel(transport: transport, authorize: { throw DopaAuthorizationError.denied })
+    model.startMonitoring()
+    for _ in 0..<200 {
+      if await transport.connectCount() >= 1 { break }
+      try await Task.sleep(nanoseconds: 50_000_000)
+    }
+    XCTAssertEqual(model.connectionState, .connected)
+    await transport.setCloseHeld(true)
+    await transport.setPollFailure(.disconnected)
+    await transport.waitUntilCloseStarted()
+    await transport.setPollFailure(nil)
+
+    // Attempt the reconnect while the stale close is still suspended. It
+    // must wait for that close instead of creating a connection the close can
+    // tear down afterwards.
+    let reconnect = Task { @MainActor in try await model.connectOnce() }
+    try await Task.sleep(nanoseconds: 100_000_000)
+    let connectsWhileClosing = await transport.connectCount()
+    XCTAssertEqual(connectsWhileClosing, 1)
+    await transport.releaseClose()
+    try await reconnect.value
+    for _ in 0..<100 {
+      if model.connectionState == .connected, await transport.connectCount() >= 2 { break }
+      try await Task.sleep(nanoseconds: 100_000_000)
+    }
+    XCTAssertEqual(model.connectionState, .connected)
+    let closes = await transport.closeCount()
+    XCTAssertEqual(closes, 1)
+    let didShutdown = await model.shutdown()
+    XCTAssertTrue(didShutdown)
+  }
+
+  func testMonitoringBacksOffWhenPollReturnsEmptyImmediately() async throws {
+    let idle = modelSnapshotJSON()
+    let transport = MockDaemonTransport(
+      handshake: DaemonHandshake(capabilities: [], snapshot: try DaemonSnapshot(idle)),
+      statusValue: idle)
+    await transport.setEmptyPollDelayNanoseconds(nil)
+    let model = AppModel(transport: transport, authorize: { throw DopaAuthorizationError.denied })
+    model.startMonitoring()
+
+    for _ in 0..<100 {
+      if model.connectionState == .connected, await transport.pollCount() > 0 { break }
+      try await Task.sleep(nanoseconds: 10_000_000)
+    }
+    let before = await transport.pollCount()
+    try await Task.sleep(nanoseconds: 200_000_000)
+    let after = await transport.pollCount()
+    XCTAssertLessThanOrEqual(after - before, 1, "an immediate empty poll must not busy-loop")
+    let didShutdown = await model.shutdown()
+    XCTAssertTrue(didShutdown)
+  }
+
+  func testBusyDeadlineRetriesWithinPreviousOneSecondCadence() async throws {
+    let idle = modelSnapshotJSON()
+    let running = modelSnapshotJSON(
+      revision: "3", phase: "active",
+      sessions: [modelSessionJSON(id: "own", clientName: "Dopa UI", pid: 2187)],
+      systemSleepDisabled: true)
+    let transport = MockDaemonTransport(
+      handshake: DaemonHandshake(capabilities: [], snapshot: try DaemonSnapshot(idle)),
+      statusValue: running)
+    let model = AppModel(transport: transport)
+    try await model.connectOnce()
+    model.editDuration("00:00:01")
+    await transport.setStatusGetHeld(true)
+
+    let start = Task { @MainActor in await model.start() }
+    await transport.waitUntilStatusGetStarted()
+    try await Task.sleep(nanoseconds: 1_200_000_000)
+    await transport.releaseStatusGet()
+    await start.value
+    await transport.setStatusValue(modelSnapshotJSON(revision: "5"))
+
+    let retryStarted = Date()
+    for _ in 0..<50 {
+      if model.ownSessionID == nil { break }
+      try await Task.sleep(nanoseconds: 50_000_000)
+    }
+    XCTAssertNil(model.ownSessionID)
+    XCTAssertLessThan(
+      Date().timeIntervalSince(retryStarted), 1.5,
+      "busy expiry must retain the previous one-second retry cadence")
+    let didShutdown = await model.shutdown()
+    XCTAssertTrue(didShutdown)
+  }
+
+  func testShutdownClosesConnectionInstalledAfterPendingCloseStarted() async throws {
+    let idle = modelSnapshotJSON()
+    let transport = LateInstallingTransport(
+      handshake: DaemonHandshake(capabilities: [], snapshot: try DaemonSnapshot(idle)))
+    let model = AppModel(transport: transport)
+
+    let connecting = Task { @MainActor in try await model.connectOnce() }
+    await transport.waitUntilConnectStarted()
+    let shutdownCompletion = CompletionFlag()
+    let shutdown = Task { @MainActor in
+      let result = await model.shutdown()
+      await shutdownCompletion.markComplete()
+      return result
+    }
+    await transport.waitUntilCloseStarted()
+
+    await transport.releaseConnect()
+    for _ in 0..<100 {
+      if await transport.isConnected() { break }
+      try await Task.sleep(nanoseconds: 10_000_000)
+    }
+    let installedAfterClose = await transport.isConnected()
+    XCTAssertTrue(installedAfterClose)
+    await transport.releaseClose()
+
+    await transport.waitUntilCloseStarted(count: 2)
+    try await Task.sleep(nanoseconds: 50_000_000)
+    let returnedBeforeFinalClose = await shutdownCompletion.isComplete
+    XCTAssertFalse(returnedBeforeFinalClose, "shutdown must await the late handshake's final close")
+    await transport.releaseClose()
+
+    let didShutdown = await shutdown.value
+    XCTAssertTrue(didShutdown)
+    do {
+      _ = try await connecting.value
+      XCTFail("a handshake completed after shutdown must be rejected")
+    } catch is CancellationError {}
+    let connectedAfterShutdown = await transport.isConnected()
+    let closeCount = await transport.closeCount()
+    XCTAssertFalse(connectedAfterShutdown)
+    XCTAssertEqual(closeCount, 2)
+  }
+
+  func testConcurrentConnectOnceCallsSerializeTransportHandshakes() async throws {
+    let idle = modelSnapshotJSON()
+    let transport = MockDaemonTransport(
+      handshake: DaemonHandshake(capabilities: [], snapshot: try DaemonSnapshot(idle)),
+      statusValue: idle)
+    await transport.setConnectHeld(true)
+    let model = AppModel(transport: transport)
+
+    let first = Task { @MainActor in try await model.connectOnce() }
+    await transport.waitUntilConnectStarted()
+    let second = Task { @MainActor in try await model.connectOnce() }
+    try await Task.sleep(nanoseconds: 50_000_000)
+    let connectsWhileHeld = await transport.connectCount()
+    XCTAssertEqual(connectsWhileHeld, 1)
+
+    await transport.releaseConnect()
+    try await first.value
+    try await second.value
+    XCTAssertEqual(model.connectionState, .connected)
+    let totalConnects = await transport.connectCount()
+    XCTAssertEqual(totalConnects, 2, "each public call must retain its connection attempt")
+    let didShutdown = await model.shutdown()
+    XCTAssertTrue(didShutdown)
+  }
+
+  func testQueuedConnectFailureDisconnectsConnectionItReplaced() async throws {
+    let idle = modelSnapshotJSON()
+    let transport = MockDaemonTransport(
+      handshake: DaemonHandshake(capabilities: [], snapshot: try DaemonSnapshot(idle)),
+      statusValue: idle)
+    await transport.setConnectHeld(true)
+    await transport.failConnect(attempt: 2)
+    let model = AppModel(transport: transport)
+
+    // Let one public attempt own the permit, then queue a second public attempt
+    // behind it while the first handshake is suspended.
+    let first = Task { @MainActor in try await model.connectOnce() }
+    await transport.waitUntilConnectStarted()
+    let second = Task { @MainActor in try await model.connectOnce() }
+    try await Task.sleep(nanoseconds: 50_000_000)
+    let connectsWhileHeld = await transport.connectCount()
+    XCTAssertEqual(connectsWhileHeld, 1)
+
+    await transport.releaseConnect()
+    try await first.value
+    do {
+      try await second.value
+      XCTFail("the configured second connection attempt must fail")
+    } catch MockDaemonTransport.Failure.disconnected {}
+    let totalConnects = await transport.connectCount()
+    XCTAssertEqual(totalConnects, 2)
+    XCTAssertEqual(
+      model.connectionState, .disconnected,
+      "the queued attempt's failure must invalidate the connection it replaced")
+    XCTAssertNil(model.snapshot)
+    let closesAfterFailure = await transport.closeCount()
+    XCTAssertEqual(closesAfterFailure, 1)
+
+    let didShutdown = await model.shutdown()
+    XCTAssertTrue(didShutdown)
+  }
+}
+
+private actor CompletionFlag {
+  private(set) var isComplete = false
+  func markComplete() { isComplete = true }
 }

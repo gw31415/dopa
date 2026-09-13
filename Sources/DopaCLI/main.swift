@@ -77,10 +77,24 @@ private struct CLIError: Error, CustomStringConvertible {
 private final class SignalState: @unchecked Sendable {
   private let lock = NSLock()
   private var value = false
+  private var notifyDescriptor: Int32
+
+  init(notifyDescriptor: Int32) {
+    self.notifyDescriptor = notifyDescriptor
+  }
 
   func requestStop() {
     lock.lock()
     value = true
+    if notifyDescriptor >= 0 {
+      var byte: UInt8 = 1
+      while Darwin.write(notifyDescriptor, &byte, 1) < 0 {
+        if errno == EINTR { continue }
+        // EAGAIN means a wake byte is already pending. The boolean remains
+        // authoritative for every other failure as well.
+        break
+      }
+    }
     lock.unlock()
   }
 
@@ -88,6 +102,14 @@ private final class SignalState: @unchecked Sendable {
     lock.lock()
     defer { lock.unlock() }
     return value
+  }
+
+  func retireNotificationDescriptor() {
+    lock.lock()
+    let descriptor = notifyDescriptor
+    notifyDescriptor = -1
+    if descriptor >= 0 { Darwin.close(descriptor) }
+    lock.unlock()
   }
 }
 
@@ -98,6 +120,9 @@ private func installSignalSources(state: SignalState) -> [DispatchSourceSignal] 
     // middle of the release request.
     _ = Darwin.signal(signalNumber, SIG_IGN)
     let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .global())
+    // This handler runs on a dispatch queue, not in async-signal context.
+    // SignalState serializes write-end retirement with every notification, so
+    // a late cancelled handler cannot write to a closed or reused descriptor.
     source.setEventHandler { state.requestStop() }
     source.resume()
     return source
@@ -117,14 +142,51 @@ private func writeError(_ message: String) {
   try? FileHandle.standardError.write(contentsOf: Data("dopa: \(message)\n".utf8))
 }
 
+/// Consumes one event if it is already queued or arrives within `timeout`.
+/// `nil` means there was no event, `false` means an unrelated event was
+/// consumed, and `true` means this session ended successfully.
+private func receiveSessionEvent(
+  connection: DopaConnection, sessionID: String, timeout: TimeInterval
+) throws -> Bool? {
+  guard let event = try connection.receive(timeout: timeout) else { return nil }
+  guard event["event"]?.stringValue == "session.ended" else { return false }
+  guard event["data"]?["sessionId"]?.stringValue == sessionID else { return false }
+  guard event["data"]?["cleanup"]?.stringValue == "confirmed" else {
+    throw CLIError("dopa-daemon ended the session without confirming cleanup", status: 1)
+  }
+  let reason = event["data"]?["reason"]?.stringValue ?? "unknown"
+  if reason == "lid_closed" || reason == "daemon_shutdown" || reason == "user_stopped" {
+    return true
+  }
+  throw CLIError("dopa-daemon ended the session (\(reason))", status: 1)
+}
+
 private func runSession(_ options: Options) throws {
-  let signalState = SignalState()
+  // Signal pipe: lets the loop below wait on the daemon socket and stop
+  // notifications together instead of polling on a fixed cadence. Both ends
+  // are close-on-exec; the read end is non-blocking so draining never stalls.
+  var pipeFDs = [Int32](repeating: -1, count: 2)
+  guard pipeFDs.withUnsafeMutableBufferPointer({ pipe($0.baseAddress!) }) == 0 else {
+    throw CLIError("cannot create signal pipe: \(String(cString: strerror(errno)))", status: 1)
+  }
+  for fd in pipeFDs {
+    guard fcntl(fd, F_SETFD, FD_CLOEXEC) == 0, fcntl(fd, F_SETFL, O_NONBLOCK) == 0 else {
+      for open in pipeFDs where open >= 0 { Darwin.close(open) }
+      throw CLIError("cannot configure signal pipe: \(String(cString: strerror(errno)))", status: 1)
+    }
+  }
+  let signalState = SignalState(notifyDescriptor: pipeFDs[1])
   let signalSources = installSignalSources(state: signalState)
   defer {
     for source in signalSources { source.cancel() }
     for signalNumber in [SIGINT, SIGTERM, SIGHUP, SIGQUIT] {
       _ = Darwin.signal(signalNumber, SIG_DFL)
     }
+    // Retire the write end under the same lock used by event handlers before
+    // closing the read end. This also avoids SIGPIPE and descriptor reuse if a
+    // cancellation races a queued signal delivery.
+    signalState.retireNotificationDescriptor()
+    Darwin.close(pipeFDs[0])
   }
 
   let connection: DopaConnection
@@ -160,31 +222,57 @@ private func runSession(_ options: Options) throws {
   }
 
   writeError("sleep inhibition active; press Ctrl+C to release")
-  while true {
-    if signalState.requested {
-      do {
-        try release(connection: connection, sessionID: sessionID)
-        return
-      } catch {
-        throw CLIError("could not confirm session release: \(error)", status: 1)
+  var pipeByte: UInt8 = 0
+  do {
+    while true {
+      if signalState.requested {
+        do {
+          try release(connection: connection, sessionID: sessionID)
+          return
+        } catch {
+          throw CLIError("could not confirm session release: \(error)", status: 1)
+        }
       }
-    }
 
-    do {
-      guard let event = try connection.receive(timeout: 0.2) else { continue }
-      guard event["event"]?.stringValue == "session.ended" else { continue }
-      guard event["data"]?["sessionId"]?.stringValue == sessionID else { continue }
-      guard event["data"]?["cleanup"]?.stringValue == "confirmed" else {
-        throw CLIError("dopa-daemon ended the session without confirming cleanup", status: 1)
+      // A request can decode its response and a following event from one
+      // socket read. Drain that client-side queue before waiting on the
+      // kernel descriptor, which may already be empty in that case.
+      if let ended = try receiveSessionEvent(
+        connection: connection, sessionID: sessionID, timeout: 0)
+      {
+        if ended { return }
+        continue
       }
-      let reason = event["data"]?["reason"]?.stringValue ?? "unknown"
-      if reason == "lid_closed" || reason == "daemon_shutdown" || reason == "user_stopped" { return }
-      throw CLIError("dopa-daemon ended the session (\(reason))", status: 1)
-    } catch let error as CLIError {
-      throw error
-    } catch {
-      throw CLIError("dopa-daemon connection failed: \(error)", status: 1)
+
+      // Wait for daemon traffic or a stop notification together. Either one
+      // wakes the loop immediately; the signal flag is rechecked at the top.
+      var items = [
+        Darwin.pollfd(fd: connection.socketDescriptor, events: Int16(POLLIN), revents: 0),
+        Darwin.pollfd(fd: pipeFDs[0], events: Int16(POLLIN), revents: 0),
+      ]
+      let ready = Darwin.poll(&items, nfds_t(items.count), -1)
+      if ready < 0 {
+        if errno == EINTR { continue }
+        throw CLIError(
+          "dopa-daemon connection failed: \(String(cString: strerror(errno)))", status: 1)
+      }
+      if items[1].revents & Int16(POLLIN) != 0 {
+        while Darwin.read(pipeFDs[0], &pipeByte, 1) > 0 {}
+        continue
+      }
+      guard items[0].revents & Int16(POLLIN | POLLHUP | POLLERR | POLLNVAL) != 0 else {
+        continue
+      }
+      // The socket reported activity, so this returns promptly; the bound
+      // only caps a spurious wakeup, matching the previous tick length.
+      if try receiveSessionEvent(connection: connection, sessionID: sessionID, timeout: 0.2) == true {
+        return
+      }
     }
+  } catch let error as CLIError {
+    throw error
+  } catch {
+    throw CLIError("dopa-daemon connection failed: \(error)", status: 1)
   }
 }
 

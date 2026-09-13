@@ -14,6 +14,7 @@ enum PAMAuthorizationRunner {
   }
 
   private static let maximumTranscriptBytes = 64 * 1024
+  private static let readChunkBytes = 4096
   private static let authenticationTimeout: Duration = .seconds(300)
   private static let commandTimeout: Duration = .seconds(60)
 
@@ -46,7 +47,10 @@ enum PAMAuthorizationRunner {
 
       let markerData = Data(marker.utf8)
       let commandStartedMarkerData = Data(commandStartedMarker.utf8)
+      let retainedScanBytes = max(markerData.count, commandStartedMarkerData.count) - 1
+      var readBuffer = [UInt8](repeating: 0, count: readChunkBytes)
       var scanBuffer = Data()
+      var scanOffset = 0
       var transcript = Data()
       let clock = ContinuousClock()
       let authenticationDeadline = clock.now.advanced(by: authenticationTimeout)
@@ -74,30 +78,42 @@ enum PAMAuthorizationRunner {
             status: 1, standardError: "PAM認証の端末が予期せず閉じられました。"))
         }
         if ready > 0, descriptor.revents & Int16(POLLIN | POLLHUP | POLLERR) != 0 {
+          // The master is non-blocking: drain only the bytes readable now, then
+          // return to the outer poll so the deadline and the child are rechecked.
           while true {
-            var bytes = [UInt8](repeating: 0, count: 4096)
-            let count = Darwin.read(master, &bytes, bytes.count)
+            let count = Darwin.read(master, &readBuffer, readBuffer.count)
             guard count > 0 else {
               if count < 0, errno == EINTR { continue }
               break
             }
-            let chunk = Data(bytes.prefix(count))
+            let chunk = readBuffer[0..<count]
             appendDiagnostic(chunk, to: &transcript)
-            scanBuffer.append(chunk)
+            scanBuffer.append(contentsOf: chunk)
             // Do not infer a password prompt from terminal ECHO. Touch ID and
             // Apple Watch PAM modules also disable ECHO while trusted UI is up.
             // Only sudo's unique -p marker proves that textual input is needed.
-            if scanBuffer.range(of: markerData) != nil {
+            // Bytes before scanOffset are already consumed; searching from the
+            // retained suffix keeps markers split across two reads detectable.
+            let scanStart = scanBuffer.index(scanBuffer.startIndex, offsetBy: scanOffset)
+            if scanBuffer.range(of: markerData, in: scanStart..<scanBuffer.endIndex) != nil {
               terminate(child: child, master: master, status: &status)
               return .textInputRequired
             }
-            if scanBuffer.range(of: commandStartedMarkerData) != nil,
+            if scanBuffer.range(of: commandStartedMarkerData, in: scanStart..<scanBuffer.endIndex) != nil,
               commandDeadline == nil {
               commandDeadline = clock.now.advanced(by: commandTimeout)
             }
-            let retainedCount = max(markerData.count, commandStartedMarkerData.count) - 1
-            if scanBuffer.count > retainedCount {
-              scanBuffer.removeFirst(scanBuffer.count - retainedCount)
+            if scanBuffer.count - scanOffset > retainedScanBytes {
+              scanOffset = scanBuffer.count - retainedScanBytes
+            }
+            // Release consumed bytes without shifting the live suffix on every
+            // chunk; drop the front once the offset reaches a full read chunk.
+            if scanOffset == scanBuffer.count {
+              scanBuffer.removeAll(keepingCapacity: false)
+              scanOffset = 0
+            } else if scanOffset >= readChunkBytes {
+              scanBuffer.removeFirst(scanOffset)
+              scanOffset = 0
             }
           }
         }
@@ -111,7 +127,7 @@ enum PAMAuthorizationRunner {
         }
       }
 
-      drain(master, into: &transcript)
+      drain(master, into: &transcript, using: &readBuffer)
       close(master)
       return .completed(.init(
         status: exitStatus(status),
@@ -159,20 +175,21 @@ enum PAMAuthorizationRunner {
     return false
   }
 
-  private static func drain(_ descriptor: Int32, into transcript: inout Data) {
+  private static func drain(
+    _ descriptor: Int32, into transcript: inout Data, using readBuffer: inout [UInt8]
+  ) {
     let oldFlags = fcntl(descriptor, F_GETFL)
     if oldFlags >= 0 { _ = fcntl(descriptor, F_SETFL, oldFlags | O_NONBLOCK) }
-    var bytes = [UInt8](repeating: 0, count: 4096)
     while true {
-      let count = Darwin.read(descriptor, &bytes, bytes.count)
+      let count = Darwin.read(descriptor, &readBuffer, readBuffer.count)
       guard count > 0 else { return }
-      appendDiagnostic(Data(bytes.prefix(count)), to: &transcript)
+      appendDiagnostic(readBuffer[0..<count], to: &transcript)
     }
   }
 
-  private static func appendDiagnostic(_ data: Data, to transcript: inout Data) {
+  private static func appendDiagnostic(_ bytes: ArraySlice<UInt8>, to transcript: inout Data) {
     guard transcript.count < maximumTranscriptBytes else { return }
-    transcript.append(data.prefix(maximumTranscriptBytes - transcript.count))
+    transcript.append(contentsOf: bytes.prefix(maximumTranscriptBytes - transcript.count))
   }
 
   private static func sanitizedDiagnostic(_ data: Data, markers: [String]) -> String {

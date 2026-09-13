@@ -310,8 +310,17 @@ public final class DaemonManager: @unchecked Sendable {
     try checkRoot()
     let lock = try acquireManagementLock()
     defer { close(lock) }
-    let source = try readExecutable(at: executableURL.path)
+    let stagedExecutable = try stageExecutable(at: executableURL.path)
+    defer { close(stagedExecutable) }
+    try installLocked(
+      stagedExecutableFD: stagedExecutable, user: user, environment: environment)
+  }
 
+  private func installLocked(
+    stagedExecutableFD: Int32,
+    user: String?,
+    environment: [String: String]
+  ) throws {
     let existing = try snapshotManagedFiles()
     let hasExisting = existing.contains { $0.exists }
     if hasExisting && !existing.allSatisfy({ $0.exists }) {
@@ -346,7 +355,9 @@ public final class DaemonManager: @unchecked Sendable {
 
     var bootstrapAttempted = false
     do {
-      try writeManagedFiles(source: source, configuration: DaemonConfiguration(allowedUID: requestedUID))
+      try writeManagedFiles(
+        sourceFD: stagedExecutableFD,
+        configuration: DaemonConfiguration(allowedUID: requestedUID))
       bootstrapAttempted = true
       try bootstrap()
       try waitUntilReady()
@@ -374,32 +385,54 @@ public final class DaemonManager: @unchecked Sendable {
     environment: [String: String] = ProcessInfo.processInfo.environment
   ) throws {
     try checkRoot()
-    guard layout != legacyLayout, !(try hasIdentityFiles()) else {
-      try install(executableURL: executableURL, user: user, environment: environment)
-      return
-    }
-
     let legacyManager = DaemonManager(
       layout: legacyLayout,
       commandRunner: commandRunner,
       shutdownRequester: shutdownRequester,
       readinessChecker: readinessChecker,
       requireRoot: requireRoot)
-    guard try legacyManager.hasIdentityFiles() else {
-      try install(executableURL: executableURL, user: user, environment: environment)
+    // Hold every participating installation's lock for the complete identity
+    // transition. Public install/uninstall calls use these same files, so no
+    // lifecycle command can enter between removal of the legacy identity and
+    // publication (or rollback) of the current one.
+    let locks = try acquireManagementLocks(with: legacyManager)
+    defer { for lock in locks.reversed() { close(lock) } }
+
+    // Read and durably stage every candidate byte before stopping a working
+    // service. The returned descriptor refers to an unlinked, read-only inode,
+    // so later source-path replacement or in-place mutation cannot affect the
+    // executable that is eventually published.
+    let stagedExecutable = try stageExecutable(at: executableURL.path)
+    defer { close(stagedExecutable) }
+
+    guard layout != legacyLayout, !(try hasIdentityFiles()) else {
+      try installLocked(
+        stagedExecutableFD: stagedExecutable, user: user, environment: environment)
       return
     }
 
-    let legacyIdentity = try legacyManager.snapshotIdentityFiles()
-    guard legacyIdentity.allSatisfy(\.exists) else {
+    guard try legacyManager.hasIdentityFiles() else {
+      try installLocked(
+        stagedExecutableFD: stagedExecutable, user: user, environment: environment)
+      return
+    }
+
+    let legacyInstallation = try legacyManager.snapshotManagedFiles()
+    guard legacyInstallation.allSatisfy(\.exists) else {
       throw DaemonManagementError.invalidConfiguration(
         "legacy daemon installation is incomplete; refusing to migrate it")
     }
-    let legacyConfiguration = try DaemonConfiguration.loadSecure(
-      from: legacyLayout.configPath,
-      ownerUID: legacyLayout.expectedOwnerUID,
-      groupGID: legacyLayout.expectedGroupGID,
-      mode: 0o600)
+    guard
+      let legacyConfigSnapshot = legacyInstallation.first(where: {
+        $0.path == legacyLayout.configPath
+      }),
+      legacyConfigSnapshot.mode == 0o600,
+      let legacyConfigData = legacyConfigSnapshot.data
+    else {
+      throw DaemonManagementError.unsafePath(
+        "unsafe daemon configuration: \(legacyLayout.configPath)")
+    }
+    let legacyConfiguration = try DaemonConfiguration(data: legacyConfigData)
     if let user {
       let requestedUID = try DaemonUserResolver.resolve(user)
       guard requestedUID == legacyConfiguration.allowedUID else {
@@ -408,25 +441,31 @@ public final class DaemonManager: @unchecked Sendable {
       }
     }
 
-    // Validate the replacement before taking the working legacy service down.
-    _ = try readExecutable(at: executableURL.path)
     let preservedUser = String(legacyConfiguration.allowedUID)
-    try legacyManager.uninstall()
+    try legacyManager.uninstallLocked(waitForRestoredService: true)
     do {
-      try install(
-        executableURL: executableURL, user: preservedUser, environment: environment)
+      try installLocked(
+        stagedExecutableFD: stagedExecutable,
+        user: preservedUser,
+        environment: environment)
     } catch {
       let migrationError = error
+      // A failed rollback can mean the replacement service is still live. In
+      // that state overwriting its files with the legacy identity is unsafe;
+      // retain the recovery artifacts and propagate the more useful error.
       if let managementError = migrationError as? DaemonManagementError,
-        case .rollbackFailed = managementError {
+        case .rollbackFailed = managementError
+      {
         throw migrationError
       }
       do {
-        try legacyManager.install(
-          executableURL: executableURL, user: preservedUser, environment: environment)
+        try legacyManager.restore(snapshots: legacyInstallation)
+        try legacyManager.bootstrap()
+        try legacyManager.waitUntilReady()
       } catch {
         throw DaemonManagementError.rollbackFailed(
-          "identity migration failed (\(migrationError)); legacy service restoration failed (\(error))")
+          "identity migration failed (\(migrationError)); legacy service restoration failed (\(error))"
+        )
       }
       throw migrationError
     }
@@ -436,6 +475,10 @@ public final class DaemonManager: @unchecked Sendable {
     try checkRoot()
     let lock = try acquireManagementLock()
     defer { close(lock) }
+    try uninstallLocked()
+  }
+
+  private func uninstallLocked(waitForRestoredService: Bool = false) throws {
     let existing = try snapshotManagedFiles()
     guard existing.contains(where: { $0.exists }) else { return }
 
@@ -455,6 +498,7 @@ public final class DaemonManager: @unchecked Sendable {
       do {
         try restore(snapshots: existing)
         try bootstrap()
+        if waitForRestoredService { try waitUntilReady() }
       } catch {
         throw DaemonManagementError.rollbackFailed(
           "uninstall failed (\(error)); previous installation could not be restored")
@@ -506,6 +550,32 @@ public final class DaemonManager: @unchecked Sendable {
   private func checkRoot() throws {
     guard !requireRoot || geteuid() == 0 else {
       throw DaemonManagementError.permissionDenied("root is required; run with sudo")
+    }
+  }
+
+  private func acquireManagementLocks(with other: DaemonManager) throws -> [Int32] {
+    let participants = [self, other]
+      .map { manager in
+        (
+          path: URL(
+            fileURLWithPath: manager.normalizeKnownSystemAlias(manager.layout.statePath)
+          ).standardizedFileURL.path,
+          manager: manager
+        )
+      }
+      .sorted { $0.path < $1.path }
+
+    var locks: [Int32] = []
+    var previousPath: String?
+    do {
+      for participant in participants where participant.path != previousPath {
+        locks.append(try participant.manager.acquireManagementLock())
+        previousPath = participant.path
+      }
+      return locks
+    } catch {
+      for lock in locks.reversed() { close(lock) }
+      throw error
     }
   }
 
@@ -650,57 +720,176 @@ public final class DaemonManager: @unchecked Sendable {
     }
   }
 
-  private func readExecutable(at path: String) throws -> Data {
+  private func openExecutable(at path: String) throws -> Int32 {
     let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
     guard fd >= 0 else {
       throw DaemonManagementError.unsafePath(
         "cannot inspect daemon executable: \(String(cString: strerror(errno)))")
     }
-    defer { close(fd) }
     var info = stat()
     guard fstat(fd, &info) == 0 else {
+      close(fd)
       throw DaemonManagementError.unsafePath(
         "cannot inspect daemon executable: \(String(cString: strerror(errno)))")
     }
     guard info.st_mode & S_IFMT == S_IFREG, info.st_nlink == 1 else {
+      close(fd)
       throw DaemonManagementError.unsafePath("daemon executable must be a regular file")
     }
     guard info.st_mode & 0o111 != 0 else {
+      close(fd)
       throw DaemonManagementError.unsafePath("daemon executable is not executable")
     }
-    do {
-      var data = Data()
-      var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-      while true {
-        let count = Darwin.read(fd, &buffer, buffer.count)
-        if count < 0 {
-          if errno == EINTR { continue }
-          throw DaemonManagementError.unsafePath(
-            "cannot read daemon executable: \(String(cString: strerror(errno)))")
-        }
-        if count == 0 { break }
-        data.append(contentsOf: buffer.prefix(count))
-      }
-      guard !data.isEmpty else {
-        throw DaemonManagementError.unsafePath("daemon executable is empty")
-      }
-      return data
-    } catch let error as DaemonManagementError {
-      throw error
-    } catch {
-      throw DaemonManagementError.unsafePath(
-        "cannot read daemon executable: \(error.localizedDescription)")
+    guard info.st_size > 0 else {
+      close(fd)
+      throw DaemonManagementError.unsafePath("daemon executable is empty")
     }
+    return fd
   }
 
-  private func writeManagedFiles(source: Data, configuration: DaemonConfiguration) throws {
+  private func stageExecutable(at path: String) throws -> Int32 {
+    let sourceFD = try openExecutable(at: path)
+    defer { close(sourceFD) }
+
+    var sourceBefore = stat()
+    guard fstat(sourceFD, &sourceBefore) == 0 else {
+      throw DaemonManagementError.unsafePath(
+        "cannot inspect daemon executable: \(String(cString: strerror(errno)))")
+    }
+
+    let directory = try openDirectory(layout.statePath)
+    defer { close(directory) }
+    let temporaryName = ".candidate-\(UUID().uuidString)"
+    var stagedLinked = true
+    var writer = openat(
+      directory, temporaryName,
+      O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+      0o600)
+    guard writer >= 0 else {
+      throw DaemonManagementError.commandFailed(
+        "create staged daemon executable: \(String(cString: strerror(errno)))")
+    }
+    defer {
+      if writer >= 0 { close(writer) }
+      if stagedLinked { _ = unlinkat(directory, temporaryName, 0) }
+    }
+
+    var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+    var copied: off_t = 0
+    while true {
+      let count = Darwin.read(sourceFD, &buffer, buffer.count)
+      if count < 0 {
+        if errno == EINTR { continue }
+        throw DaemonManagementError.unsafePath(
+          "cannot read daemon executable: \(String(cString: strerror(errno)))")
+      }
+      if count == 0 { break }
+      copied += off_t(count)
+
+      var written = 0
+      while written < count {
+        let amount = buffer.withUnsafeBytes { rawBuffer in
+          Darwin.write(
+            writer,
+            rawBuffer.baseAddress!.advanced(by: written),
+            count - written)
+        }
+        if amount < 0 {
+          if errno == EINTR { continue }
+          throw DaemonManagementError.commandFailed(
+            "write staged daemon executable: \(String(cString: strerror(errno)))")
+        }
+        guard amount > 0 else {
+          throw DaemonManagementError.commandFailed(
+            "zero-length staged daemon executable write")
+        }
+        written += amount
+      }
+    }
+
+    var sourceAfter = stat()
+    guard fstat(sourceFD, &sourceAfter) == 0 else {
+      throw DaemonManagementError.unsafePath(
+        "cannot inspect daemon executable after staging: \(String(cString: strerror(errno)))")
+    }
+    guard copied > 0,
+      copied == sourceBefore.st_size,
+      sourceBefore.st_dev == sourceAfter.st_dev,
+      sourceBefore.st_ino == sourceAfter.st_ino,
+      sourceBefore.st_size == sourceAfter.st_size,
+      sourceBefore.st_mtimespec.tv_sec == sourceAfter.st_mtimespec.tv_sec,
+      sourceBefore.st_mtimespec.tv_nsec == sourceAfter.st_mtimespec.tv_nsec,
+      sourceBefore.st_ctimespec.tv_sec == sourceAfter.st_ctimespec.tv_sec,
+      sourceBefore.st_ctimespec.tv_nsec == sourceAfter.st_ctimespec.tv_nsec
+    else {
+      throw DaemonManagementError.unsafePath(
+        "daemon executable changed while it was being staged")
+    }
+
+    guard fchmod(writer, 0o400) == 0 else {
+      throw DaemonManagementError.commandFailed(
+        "secure staged daemon executable: \(String(cString: strerror(errno)))")
+    }
+    guard fchown(writer, layout.expectedOwnerUID, layout.expectedGroupGID) == 0 else {
+      throw DaemonManagementError.commandFailed(
+        "set staged daemon executable ownership: \(String(cString: strerror(errno)))")
+    }
+    guard fsync(writer) == 0 else {
+      throw DaemonManagementError.commandFailed(
+        "flush staged daemon executable: \(String(cString: strerror(errno)))")
+    }
+
+    var stagedInfo = stat()
+    guard fstat(writer, &stagedInfo) == 0 else {
+      throw DaemonManagementError.commandFailed(
+        "inspect staged daemon executable: \(String(cString: strerror(errno)))")
+    }
+    close(writer)
+    writer = -1
+
+    let stagedFD = openat(directory, temporaryName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    guard stagedFD >= 0 else {
+      throw DaemonManagementError.commandFailed(
+        "open staged daemon executable: \(String(cString: strerror(errno)))")
+    }
+    var reopenedInfo = stat()
+    guard fstat(stagedFD, &reopenedInfo) == 0,
+      reopenedInfo.st_dev == stagedInfo.st_dev,
+      reopenedInfo.st_ino == stagedInfo.st_ino,
+      reopenedInfo.st_mode & S_IFMT == S_IFREG,
+      reopenedInfo.st_nlink == 1,
+      reopenedInfo.st_uid == layout.expectedOwnerUID,
+      reopenedInfo.st_gid == layout.expectedGroupGID,
+      reopenedInfo.st_mode & 0o7777 == 0o400,
+      reopenedInfo.st_size == copied
+    else {
+      close(stagedFD)
+      throw DaemonManagementError.unsafePath("staged daemon executable verification failed")
+    }
+    guard unlinkat(directory, temporaryName, 0) == 0 else {
+      let message = String(cString: strerror(errno))
+      close(stagedFD)
+      throw DaemonManagementError.commandFailed(
+        "unlink staged daemon executable: \(message)")
+    }
+    stagedLinked = false
+    guard fsync(directory) == 0 else {
+      let message = String(cString: strerror(errno))
+      close(stagedFD)
+      throw DaemonManagementError.commandFailed(
+        "flush staged daemon executable cleanup: \(message)")
+    }
+    return stagedFD
+  }
+
+  private func writeManagedFiles(sourceFD: Int32, configuration: DaemonConfiguration) throws {
     try ensureDirectory(layout.statePath, mode: 0o700)
     try ensureDirectory(
       URL(fileURLWithPath: layout.socketPath).deletingLastPathComponent().path, mode: 0o755)
     try ensureParent(of: layout.executablePath, mode: 0o755)
     try ensureParent(of: layout.plistPath, mode: 0o755)
     try ensureParent(of: layout.configPath, mode: 0o700)
-    try writeAtomically(source, to: layout.executablePath, mode: 0o755)
+    try writeAtomically(from: sourceFD, to: layout.executablePath, mode: 0o755)
     try writeAtomically(plistData(), to: layout.plistPath, mode: 0o644)
     try writeAtomically(try configuration.data(), to: layout.configPath, mode: 0o600)
     try verifyManagedFile(layout.executablePath, mode: 0o755)
@@ -709,40 +898,109 @@ public final class DaemonManager: @unchecked Sendable {
   }
 
   private func writeAtomically(_ data: Data, to path: String, mode: mode_t) throws {
+    try writeAtomically(to: path, mode: mode) { fd in
+      var written = 0
+      // Write straight from the Data storage; materializing a [UInt8] copy
+      // would duplicate the whole payload before the write loop even starts.
+      try data.withUnsafeBytes { buffer in
+        while written < buffer.count {
+          let amount = Darwin.write(
+            fd, buffer.baseAddress!.advanced(by: written), buffer.count - written)
+          if amount < 0 {
+            if errno == EINTR { continue }
+            throw DaemonManagementError.commandFailed(
+              "write managed file: \(String(cString: strerror(errno)))")
+          }
+          guard amount > 0 else {
+            throw DaemonManagementError.commandFailed("zero-length managed file write")
+          }
+          written += amount
+        }
+      }
+    }
+  }
+
+  private func writeAtomically(from sourceFD: Int32, to path: String, mode: mode_t) throws {
+    guard lseek(sourceFD, 0, SEEK_SET) >= 0 else {
+      throw DaemonManagementError.commandFailed(
+        "rewind daemon executable: \(String(cString: strerror(errno)))")
+    }
+    var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+    try writeAtomically(to: path, mode: mode) { destinationFD in
+      var copied = false
+      while true {
+        let count = Darwin.read(sourceFD, &buffer, buffer.count)
+        if count < 0 {
+          if errno == EINTR { continue }
+          throw DaemonManagementError.commandFailed(
+            "read daemon executable: \(String(cString: strerror(errno)))")
+        }
+        if count == 0 { break }
+        copied = true
+
+        var written = 0
+        while written < count {
+          let amount = buffer.withUnsafeBytes { rawBuffer in
+            Darwin.write(
+              destinationFD,
+              rawBuffer.baseAddress!.advanced(by: written),
+              count - written)
+          }
+          if amount < 0 {
+            if errno == EINTR { continue }
+            throw DaemonManagementError.commandFailed(
+              "write managed file: \(String(cString: strerror(errno)))")
+          }
+          guard amount > 0 else {
+            throw DaemonManagementError.commandFailed("zero-length managed file write")
+          }
+          written += amount
+        }
+      }
+      guard copied else {
+        throw DaemonManagementError.unsafePath("daemon executable became empty")
+      }
+    }
+  }
+
+  private func writeAtomically(
+    to path: String, mode: mode_t, body: (Int32) throws -> Void
+  ) throws {
     let parent = URL(fileURLWithPath: path).deletingLastPathComponent().path
     let parentFD = try openDirectory(parent)
     defer { close(parentFD) }
     let basename = URL(fileURLWithPath: path).lastPathComponent
     let temporaryName = ".\(basename).tmp-\(UUID().uuidString)"
-    let fd = openat(parentFD, temporaryName, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
-    guard fd >= 0 else { throw DaemonManagementError.commandFailed("create temporary managed file: \(String(cString: strerror(errno)))") }
+    let fd = openat(
+      parentFD, temporaryName, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+    guard fd >= 0 else {
+      throw DaemonManagementError.commandFailed(
+        "create temporary managed file: \(String(cString: strerror(errno)))")
+    }
     defer {
       close(fd)
       _ = unlinkat(parentFD, temporaryName, 0)
     }
-    var written = 0
-    let bytes = [UInt8](data)
-    while written < bytes.count {
-      let amount = bytes.withUnsafeBytes { buffer in
-        Darwin.write(fd, buffer.baseAddress!.advanced(by: written), buffer.count - written)
-      }
-      if amount < 0 {
-        if errno == EINTR { continue }
-        throw DaemonManagementError.commandFailed("write managed file: \(String(cString: strerror(errno)))")
-      }
-      guard amount > 0 else { throw DaemonManagementError.commandFailed("zero-length managed file write") }
-      written += amount
+    try body(fd)
+    guard fchmod(fd, mode) == 0 else {
+      throw DaemonManagementError.commandFailed(
+        "set managed file mode: \(String(cString: strerror(errno)))")
     }
-    guard fchmod(fd, mode) == 0 else { throw DaemonManagementError.commandFailed("set managed file mode: \(String(cString: strerror(errno)))") }
     guard fchown(fd, layout.expectedOwnerUID, layout.expectedGroupGID) == 0 else {
-      throw DaemonManagementError.commandFailed("set managed file ownership: \(String(cString: strerror(errno)))")
+      throw DaemonManagementError.commandFailed(
+        "set managed file ownership: \(String(cString: strerror(errno)))")
     }
-    guard fsync(fd) == 0 else { throw DaemonManagementError.commandFailed("flush managed file: \(String(cString: strerror(errno)))") }
+    guard fsync(fd) == 0 else {
+      throw DaemonManagementError.commandFailed(
+        "flush managed file: \(String(cString: strerror(errno)))")
+    }
     guard renameat(parentFD, temporaryName, parentFD, basename) == 0 else {
-      throw DaemonManagementError.commandFailed("publish managed file: \(String(cString: strerror(errno)))")
+      throw DaemonManagementError.commandFailed(
+        "publish managed file: \(String(cString: strerror(errno)))")
     }
     guard fsync(parentFD) == 0 else {
-      throw DaemonManagementError.commandFailed("flush managed file publication: \(String(cString: strerror(errno)))")
+      throw DaemonManagementError.commandFailed(
+        "flush managed file publication: \(String(cString: strerror(errno)))")
     }
   }
 

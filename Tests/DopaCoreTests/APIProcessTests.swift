@@ -51,6 +51,16 @@ final class APIProcessTests: XCTestCase {
       }
       return pending.removeFirst()
     }
+
+    func hasMessage(within milliseconds: Int32) throws -> Bool {
+      if !pending.isEmpty { return true }
+      var entry = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+      let result = poll(&entry, 1, milliseconds)
+      if result < 0 {
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+      }
+      return result > 0 && entry.revents & Int16(POLLIN) != 0
+    }
   }
 
   private final class Fixture {
@@ -149,6 +159,26 @@ final class APIProcessTests: XCTestCase {
     XCTAssertEqual(final["phase"]?.stringValue, "idle")
     XCTAssertEqual(final["sessions"]?.arrayValue?.count, 0)
     XCTAssertTrue(fixture.process.isRunning)
+  }
+
+  func testSubscribeAfterUnobservedChangeDoesNotDuplicateInitialSnapshot() throws {
+    let fixture = try Fixture()
+    defer { fixture.stop(); try? FileManager.default.removeItem(at: fixture.directory) }
+    let owner = try fixture.connect()
+    defer { owner.close() }
+    _ = try acquire(owner)
+
+    let observer = try WirePeer(path: fixture.socketPath)
+    try observer.send("hello", "hello", .object([
+      "apiVersion": .number(1),
+      "client": .object(["name": .string("observer"), "version": .string("1")]),
+    ]))
+    XCTAssertNotNil(try observer.receive()["result"])
+    try observer.send("subscribe", "status.subscribe")
+    let initial = try XCTUnwrap(observer.receive()["result"])
+    XCTAssertEqual(initial["revision"]?.stringValue, "1")
+    XCTAssertEqual(initial["sessions"]?.arrayValue?.count, 1)
+    XCTAssertFalse(try observer.hasMessage(within: 250))
   }
 
   func testForeignSessionCannotBeReleasedAndUpdateChangesDisplay() throws {

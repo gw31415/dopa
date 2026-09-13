@@ -47,13 +47,20 @@ public struct DaemonSnapshot: Equatable, Sendable {
     self.systemSleepDisabled = value["confirmed"]?["systemSleepDisabled"]?.boolValue
     self.keepDisplayOn = value["confirmed"]?["keepDisplayOn"]?.boolValue
     self.error = value["lastError"]?["message"]?.stringValue
-    self.sessions = try list.map { item in
+    // Decode and duplicate-check sessions in one pass; duplicate session IDs
+    // reject the whole snapshot, and the list order is preserved as decoded.
+    var decodedSessions: [DaemonSession] = []
+    decodedSessions.reserveCapacity(list.count)
+    var seenIDs = Set<String>()
+    seenIDs.reserveCapacity(list.count)
+    for item in list {
       guard let id = item["id"]?.stringValue,
         let name = item["clientName"]?.stringValue,
         case .number(let pid) = item["peerPID"], let processID = Int32(exactly: pid),
         let display = item["options"]?["keepDisplayOn"]?.boolValue,
         let lid = item["options"]?["stopOnLidClose"]?.boolValue
       else { throw SnapshotError.malformed }
+      guard seenIDs.insert(id).inserted else { throw SnapshotError.malformed }
       let peerUID: UInt32?
       if let value = item["peerUID"] {
         guard case .number(let uid) = value, let parsed = UInt32(exactly: uid) else {
@@ -61,10 +68,10 @@ public struct DaemonSnapshot: Equatable, Sendable {
         }
         peerUID = parsed
       } else { peerUID = nil }
-      return DaemonSession(id: id, clientName: name, peerPID: processID, peerUID: peerUID,
-        options: SessionOptions(keepDisplayOn: display, stopOnLidClose: lid))
+      decodedSessions.append(DaemonSession(id: id, clientName: name, peerPID: processID, peerUID: peerUID,
+        options: SessionOptions(keepDisplayOn: display, stopOnLidClose: lid)))
     }
-    guard Set(sessions.map(\.id)).count == sessions.count else { throw SnapshotError.malformed }
+    self.sessions = decodedSessions
   }
 
   /// Decimal revisions must never pass through floating-point numbers.

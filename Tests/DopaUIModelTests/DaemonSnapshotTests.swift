@@ -76,6 +76,17 @@ final class DaemonSnapshotTests: XCTestCase {
     XCTAssertFalse(missingReadback.isConfirmed)
     XCTAssertFalse(recoveryPending.isConfirmed)
   }
+
+  func testDuplicateSessionIDsRejectWholeSnapshotWhilePreservingValidOrder() throws {
+    let first = sessionJSON(id: "a", clientName: "first", pid: 1)
+    let second = sessionJSON(id: "b", clientName: "second", pid: 2)
+    let valid = try DaemonSnapshot(snapshotJSON(
+      phase: "active", sessions: [first, second], systemSleepDisabled: true))
+    XCTAssertEqual(valid.sessions.map(\.id), ["a", "b"])
+
+    XCTAssertThrowsError(try DaemonSnapshot(snapshotJSON(
+      phase: "active", sessions: [first, first], systemSleepDisabled: true)))
+  }
 }
 
 private func snapshotJSON(

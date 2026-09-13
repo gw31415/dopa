@@ -26,30 +26,73 @@ APP_RESOURCES := \
 	Resources/Dopa.icon/icon.json \
 	$(wildcard Resources/Dopa.icon/Assets/*.svg)
 
-.PHONY: build app test check
+.PHONY: build app test check FORCE
 
-build: .build/release/dopa .build/release/dopa-daemon
+FORCE:
 
-app: .build/Dopa.app/Contents/MacOS/dopa-ui
+build: .build/.make/dopa .build/.make/dopa-daemon
+
+app: .build/.make/app
 
 test: .build/.make/test
 
 check: test build
 
-.build/release/dopa: $(BUILD_CONFIG) $(CLI_SOURCES)
-	mise exec -- swift build $(STRICT_RELEASE_FLAGS) --product dopa
-	touch $@
+.build/.make/dopa: $(BUILD_CONFIG) $(CLI_SOURCES) FORCE
+	@if test -x .build/release/dopa \
+		&& .build/release/dopa --help >/dev/null 2>&1; then artifact_ok=1; \
+	else artifact_ok=0; fi; \
+	if test "$$artifact_ok" -eq 1 && test -z "$(filter-out FORCE,$?)"; then \
+		:; \
+	else \
+		set -e; \
+		rm -f $@; \
+		if test "$$artifact_ok" -eq 0; then rm -f .build/release/dopa; fi; \
+		mise exec -- swift build $(STRICT_RELEASE_FLAGS) --product dopa; \
+		test -x .build/release/dopa; \
+		.build/release/dopa --help >/dev/null; \
+		mkdir -p $(@D); \
+		touch $@; \
+	fi
 
-.build/release/dopa-daemon: $(BUILD_CONFIG) $(DAEMON_SOURCES)
-	mise exec -- swift build $(STRICT_RELEASE_FLAGS) --product dopa-daemon
-	touch $@
+.build/.make/dopa-daemon: $(BUILD_CONFIG) $(DAEMON_SOURCES) FORCE
+	@if test -x .build/release/dopa-daemon \
+		&& .build/release/dopa-daemon --help >/dev/null 2>&1; then artifact_ok=1; \
+	else artifact_ok=0; fi; \
+	if test "$$artifact_ok" -eq 1 && test -z "$(filter-out FORCE,$?)"; then \
+		:; \
+	else \
+		set -e; \
+		rm -f $@; \
+		if test "$$artifact_ok" -eq 0; then rm -f .build/release/dopa-daemon; fi; \
+		mise exec -- swift build $(STRICT_RELEASE_FLAGS) --product dopa-daemon; \
+		test -x .build/release/dopa-daemon; \
+		.build/release/dopa-daemon --help >/dev/null; \
+		mkdir -p $(@D); \
+		touch $@; \
+	fi
 
-.build/Dopa.app/Contents/MacOS/dopa-ui: \
+.build/.make/app: \
 	$(BUILD_CONFIG) \
 	scripts/build-app.sh \
 	$(APP_RESOURCES) \
-	$(ALL_SOURCES)
-	./scripts/build-app.sh
+	$(ALL_SOURCES) \
+	FORCE
+	@if test -x .build/Dopa.app/Contents/MacOS/dopa-ui \
+		&& test -x .build/Dopa.app/Contents/Helpers/dopa \
+		&& test -x .build/Dopa.app/Contents/Helpers/dopa-daemon \
+		&& codesign --verify --deep --strict .build/Dopa.app >/dev/null 2>&1 \
+		&& .build/Dopa.app/Contents/Helpers/dopa --help >/dev/null 2>&1 \
+		&& .build/Dopa.app/Contents/Helpers/dopa-daemon --help >/dev/null 2>&1 \
+		&& test -z "$(filter-out FORCE,$?)"; then \
+		:; \
+	else \
+		set -e; \
+		rm -f $@; \
+		./scripts/build-app.sh; \
+		mkdir -p $(@D); \
+		touch $@; \
+	fi
 
 .build/.make/test: \
 	$(BUILD_CONFIG) \
@@ -57,6 +100,7 @@ check: test build
 	prototypes/ui/schedule.test.mjs \
 	$(ALL_SOURCES) \
 	$(TEST_SOURCES)
+	rm -f $@
 	mise exec -- swift test
 	mise exec -- node --test prototypes/ui/schedule.test.mjs
 	mkdir -p $(@D)

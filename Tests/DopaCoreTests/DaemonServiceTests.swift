@@ -1,3 +1,4 @@
+import CDopa
 import Darwin
 import DopaProtocol
 import Foundation
@@ -19,12 +20,16 @@ final class DaemonServiceTests: XCTestCase {
     var display = false
     var lid = false
     var failRelease = false
+    var failLidNext = false
     func keepDisplayOn() throws { display = true }
     func releaseDisplay() throws {
       if failRelease { throw DopaError("display release failure") }
       display = false
     }
-    func lidClosed() throws -> Bool { lid }
+    func lidClosed() throws -> Bool {
+      if failLidNext { failLidNext = false; throw DopaError("lid probe failure") }
+      return lid
+    }
   }
   func withEngine(
     authorizationVerifier: @escaping (Data) -> Bool = { _ in false },
@@ -141,6 +146,23 @@ final class DaemonServiceTests: XCTestCase {
       XCTAssertTrue(power.disabled)
     }
   }
+  func testLidProbeFailureIsFailClosed() throws {
+    try withEngine { engine, _, controls in
+      let one = peer()
+      // First probe fails: acquire must report lid_unavailable, not success.
+      controls.failLidNext = true
+      XCTAssertEqual(acquire(engine, one, lid: true)["error"]?["code"], .string("lid_unavailable"))
+      XCTAssertTrue(engine.sessions.isEmpty)
+      // Next probe succeeds (lid open): acquire proceeds.
+      XCTAssertNotNil(acquire(engine, one, lid: true)["result"]?["sessionId"])
+      // Active session with a failing probe ends with lid_error.
+      controls.failLidNext = true
+      engine.checkLid()
+      XCTAssertTrue(engine.sessions.isEmpty)
+      XCTAssertEqual(
+        engine.takeEvents().first?.1["data"]?["reason"], .string("lid_error"))
+    }
+  }
   func testUpdateCannotAcquireWithInvalidSessionID() throws {
     try withEngine { engine, power, _ in
       let one = peer()
@@ -156,6 +178,323 @@ final class DaemonServiceTests: XCTestCase {
     }
   }
 
+  func testBroadcastCoalescesUnsentSnapshotsInOrder() throws {
+    // Consecutive broadcasts with no interleaving traffic collapse to
+    // the newest snapshot; a response, an ended event boundary, or a sent
+    // prefix each disable coalescing for that round and keep order.
+    try withEngine { engine, _, _ in
+      let sub = peer()
+      sub.subscribed = true
+      let other = peer()
+      _ = acquire(engine, other)
+      DaemonService.deliverBroadcast(engine: engine, peers: [sub.fd.value: sub])
+      _ = acquire(engine, peer())
+      DaemonService.deliverBroadcast(engine: engine, peers: [sub.fd.value: sub])
+      var lines = JSONLineBuffer()
+      let frames = try lines.append(Data(sub.output[sub.outputOffset...]))
+      XCTAssertEqual(frames.count, 1)
+      XCTAssertEqual(frames.first?["event"]?.stringValue, "status.changed")
+      XCTAssertEqual(frames.first?["data"]?["revision"]?.stringValue, "2")
+
+      // A response in between breaks the exact tail: both snapshots survive
+      // around it, newest last.
+      let sub2 = peer()
+      sub2.subscribed = true
+      _ = acquire(engine, peer())
+      DaemonService.deliverBroadcast(engine: engine, peers: [sub2.fd.value: sub2])
+      sub2.enqueue(call(engine, sub2, "status.get"))
+      _ = acquire(engine, peer())
+      DaemonService.deliverBroadcast(engine: engine, peers: [sub2.fd.value: sub2])
+      var lines2 = JSONLineBuffer()
+      let mixed = try lines2.append(Data(sub2.output[sub2.outputOffset...]))
+      XCTAssertEqual(mixed.count, 3)
+      XCTAssertEqual(mixed[0]["event"]?.stringValue, "status.changed")
+      XCTAssertNil(mixed[1]["event"]?.stringValue)
+      XCTAssertEqual(mixed[2]["event"]?.stringValue, "status.changed")
+      let revisions = [mixed[0], mixed[2]].compactMap { $0["data"]?["revision"]?.stringValue }
+      XCTAssertEqual(revisions.count, 2)
+      XCTAssertLessThan(Int(revisions[0]) ?? 0, Int(revisions[1]) ?? 0)
+
+      // A partially sent snapshot must never be replaced.
+      let sub3 = peer()
+      sub3.subscribed = true
+      _ = acquire(engine, peer())
+      DaemonService.deliverBroadcast(engine: engine, peers: [sub3.fd.value: sub3])
+      let firstSize = sub3.queuedBytes
+      XCTAssertGreaterThan(firstSize, 20)
+      let firstRevision = engine.revision
+      sub3.didSend(10)
+      _ = acquire(engine, peer())
+      let secondRevision = engine.revision
+      XCTAssertGreaterThan(secondRevision, firstRevision)
+      DaemonService.deliverBroadcast(engine: engine, peers: [sub3.fd.value: sub3])
+      // Both frames are present: the sent prefix was not rewritten and the
+      // new frame was appended whole. The tail is not frame-aligned at its
+      // head (10 bytes already went out), so only the complete trailing
+      // frame is decoded.
+      let secondLen = sub3.queuedBytes - (firstSize - 10)
+      XCTAssertGreaterThan(secondLen, 0)
+      XCTAssertEqual(sub3.pendingSnapshotBytes, secondLen)
+      var tailLines = JSONLineBuffer()
+      let tailFrames = try tailLines.append(Data(sub3.output.suffix(secondLen)))
+      XCTAssertEqual(tailFrames.count, 1)
+      XCTAssertEqual(
+        tailFrames.first?["data"]?["revision"]?.stringValue, String(secondRevision))
+    }
+  }
+  func testSnapshotCoalescingFreesCapSpaceAndStillBounds() {
+    // Replacing the tail snapshot releases its bytes before the cap check;
+    // a genuinely oversized frame still trips the slow-reader bound.
+    let sub = peer()
+    sub.enqueueSnapshot(Data(repeating: 1, count: 200_000))
+    XCTAssertFalse(sub.dead)
+    sub.enqueueSnapshot(Data(repeating: 2, count: 100_000))
+    XCTAssertFalse(sub.dead)
+    XCTAssertEqual(sub.queuedBytes, 100_000)
+    sub.enqueueSnapshot(Data(repeating: 3, count: 300_000))
+    XCTAssertTrue(sub.dead)
+    XCTAssertLessThanOrEqual(sub.queuedBytes, 262_144)
+  }
+  func testPollTimeoutComputation() {
+    // The run loop sleeps until the earliest timer deadline, socket
+    // activity, or stop-pipe wakeup. No peers and no lid sessions means no
+    // deadlines at all (infinite wait); every deadline class shortens it.
+    let now = Date()
+    XCTAssertEqual(
+      DaemonService.pollTimeoutMilliseconds(
+        now: now, nextLid: now, nextCheck: now, peers: [:], hasLidSessions: false), -1)
+    let active = peer()
+    let connected = [active.fd.value: active]
+    let power = DaemonService.pollTimeoutMilliseconds(
+      now: now, nextLid: now, nextCheck: now.addingTimeInterval(1),
+      peers: connected, hasLidSessions: false)
+    XCTAssertGreaterThan(power, 0)
+    XCTAssertLessThanOrEqual(power, 1000)
+    let lid = DaemonService.pollTimeoutMilliseconds(
+      now: now, nextLid: now.addingTimeInterval(0.3), nextCheck: now.addingTimeInterval(3600),
+      peers: connected, hasLidSessions: true)
+    XCTAssertGreaterThan(lid, 0)
+    XCTAssertLessThanOrEqual(lid, 300)
+    let fresh = peer()
+    fresh.hello = false
+    let hello = DaemonService.pollTimeoutMilliseconds(
+      now: now, nextLid: now.addingTimeInterval(3600), nextCheck: now.addingTimeInterval(3600),
+      peers: [fresh.fd.value: fresh], hasLidSessions: false)
+    XCTAssertGreaterThan(hello, 4000)
+    // `fresh` is created just after `now`, and positive values round upward.
+    XCTAssertLessThanOrEqual(hello, 5001)
+    let partial = peer()
+    partial.partialSince = now.addingTimeInterval(-2)
+    let frame = DaemonService.pollTimeoutMilliseconds(
+      now: now, nextLid: now.addingTimeInterval(3600), nextCheck: now.addingTimeInterval(3600),
+      peers: [partial.fd.value: partial], hasLidSessions: false)
+    XCTAssertGreaterThan(frame, 0)
+    XCTAssertLessThanOrEqual(frame, 3000)
+    XCTAssertEqual(
+      DaemonService.pollTimeoutMilliseconds(
+        now: now, nextLid: now.addingTimeInterval(-1), nextCheck: now.addingTimeInterval(3600),
+        peers: connected, hasLidSessions: true), 0)
+    XCTAssertEqual(
+      DaemonService.pollTimeoutMilliseconds(
+        now: now, nextLid: now.addingTimeInterval(3600),
+        nextCheck: now.addingTimeInterval(0.000_1), peers: connected,
+        hasLidSessions: false),
+      1)
+  }
+  func testStopPipeReadEndIsNonblockingAndCloseOnExec() {
+    let descriptor = dopa_stop_fd()
+    XCTAssertGreaterThanOrEqual(descriptor, 0)
+    guard descriptor >= 0 else { return }
+    XCTAssertNotEqual(fcntl(descriptor, F_GETFL) & O_NONBLOCK, 0)
+    XCTAssertNotEqual(fcntl(descriptor, F_GETFD) & FD_CLOEXEC, 0)
+  }
+  func testBroadcastSkipsEncodeAndConsumesChangeWithoutSubscribers() throws {
+    // CLI-only peers (no subscribers) must cause zero notification
+    // encodes. The change is consumed because a later subscribe response
+    // contains the complete current snapshot; a subsequent change is encoded
+    // once and serves any number of subscribers identically.
+    try withEngine { engine, _, _ in
+      let cli = peer()
+      _ = acquire(engine, cli)
+      XCTAssertTrue(engine.changed)
+      var peers = [cli.fd.value: cli]
+      var encodes = 0
+      DaemonService.deliverBroadcast(
+        engine: engine, peers: peers,
+        encode: { value in encodes += 1; return try JSONWire.encode(value) })
+      XCTAssertEqual(encodes, 0)
+      XCTAssertTrue(cli.output.isEmpty)
+      XCTAssertFalse(engine.changed)
+      let sub1 = peer()
+      sub1.subscribed = true
+      let sub2 = peer()
+      sub2.subscribed = true
+      peers[sub1.fd.value] = sub1
+      peers[sub2.fd.value] = sub2
+      _ = acquire(engine, peer())
+      DaemonService.deliverBroadcast(
+        engine: engine, peers: peers,
+        encode: { value in encodes += 1; return try JSONWire.encode(value) })
+      XCTAssertEqual(encodes, 1)
+      XCTAssertFalse(sub1.output.isEmpty)
+      XCTAssertEqual(sub1.output, sub2.output)
+      XCTAssertTrue(cli.output.isEmpty)
+      XCTAssertFalse(engine.changed)
+    }
+  }
+  func testRecoverableWriteErrorsPreserveQueueAndFatalErrorMarksPeerDead() {
+    let one = peer()
+    one.enqueue(.object(["id": .string("1"), "result": .object([:])]))
+    let original = one.output
+
+    XCTAssertEqual(one.flush({ _ in -1 }, errorCode: { EAGAIN }), -1)
+    XCTAssertFalse(one.dead)
+    XCTAssertEqual(one.outputOffset, 0)
+    XCTAssertEqual(one.output, original)
+
+    XCTAssertEqual(one.flush({ _ in -1 }, errorCode: { EINTR }), -1)
+    XCTAssertFalse(one.dead)
+    XCTAssertEqual(one.outputOffset, 0)
+    XCTAssertEqual(one.output, original)
+
+    XCTAssertEqual(one.flush({ _ in -1 }, errorCode: { EPIPE }), -1)
+    XCTAssertTrue(one.dead)
+    XCTAssertEqual(one.outputOffset, 0)
+    XCTAssertEqual(one.output, original)
+  }
+  func testSlowSocketBackpressurePreservesOrderAndQueueBound() throws {
+    var sockets = [Int32](repeating: -1, count: 2)
+    XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets), 0)
+    guard sockets[0] >= 0, sockets[1] >= 0 else { return }
+    let writerFD = sockets[0]
+    let readerFD = sockets[1]
+    defer { Darwin.close(readerFD) }
+    let flags = fcntl(writerFD, F_GETFL)
+    XCTAssertGreaterThanOrEqual(flags, 0)
+    XCTAssertEqual(fcntl(writerFD, F_SETFL, flags | O_NONBLOCK), 0)
+    var sendBuffer: Int32 = 1_024
+    XCTAssertEqual(
+      setsockopt(
+        writerFD, SOL_SOCKET, SO_SNDBUF, &sendBuffer,
+        socklen_t(MemoryLayout<Int32>.size)),
+      0)
+
+    let slow = ServicePeer(fd: Descriptor(writerFD), uid: 501, pid: getpid())
+    let payload = String(repeating: "x", count: 8_000)
+    for sequence in 0..<24 {
+      slow.enqueue(.object([
+        "id": .string(String(sequence)),
+        "result": .object(["payload": .string(payload)]),
+      ]))
+    }
+    XCTAssertFalse(slow.dead)
+    XCTAssertLessThanOrEqual(slow.queuedBytes, 262_144)
+    let expected = slow.output
+
+    var hitBackpressure = false
+    while !slow.isEmpty {
+      let result = slow.flush { raw in
+        Darwin.write(writerFD, raw.baseAddress, raw.count)
+      }
+      if result < 0 {
+        XCTAssertEqual(errno, EAGAIN)
+        hitBackpressure = true
+        break
+      }
+      XCTAssertGreaterThan(result, 0)
+    }
+    XCTAssertTrue(hitBackpressure)
+    XCTAssertFalse(slow.dead)
+    XCTAssertGreaterThan(slow.queuedBytes, 0)
+
+    var received = Data()
+    var bytes = [UInt8](repeating: 0, count: 16_384)
+    while !slow.isEmpty {
+      let count = Darwin.read(readerFD, &bytes, bytes.count)
+      XCTAssertGreaterThan(count, 0)
+      received.append(contentsOf: bytes.prefix(count))
+      while !slow.isEmpty {
+        let result = slow.flush { raw in
+          Darwin.write(writerFD, raw.baseAddress, raw.count)
+        }
+        if result < 0 {
+          XCTAssertEqual(errno, EAGAIN)
+          XCTAssertFalse(slow.dead)
+          break
+        }
+        XCTAssertGreaterThan(result, 0)
+      }
+    }
+    XCTAssertEqual(shutdown(writerFD, SHUT_WR), 0)
+    while true {
+      let count = Darwin.read(readerFD, &bytes, bytes.count)
+      if count == 0 { break }
+      XCTAssertGreaterThan(count, 0)
+      received.append(contentsOf: bytes.prefix(count))
+    }
+    XCTAssertEqual(received, expected)
+    var lines = JSONLineBuffer()
+    XCTAssertEqual(
+      try lines.append(received).compactMap { $0["id"]?.stringValue },
+      (0..<24).map(String.init))
+  }
+  func testOutputOffsetPartialWriteCapAndOrder() {
+    // Partial writes expose only undelivered bytes in order, the 256 KiB
+    // cap counts undelivered bytes (not the drained prefix), the drained
+    // prefix compacts past 64 KiB, and full drain releases storage.
+    let p = peer()
+    p.enqueue(.object(["id": .string("1"), "result": .object(["a": .number(1)])]))
+    p.enqueue(.object(["id": .string("2"), "result": .object(["b": .number(2)])]))
+    let total = p.queuedBytes
+    XCTAssertGreaterThan(total, 0)
+    var head: [UInt8] = []
+    XCTAssertEqual(p.writeSlice { raw in head = Array(raw.prefix(10)); return min(10, raw.count) }, 10)
+    p.didSend(10)
+    XCTAssertEqual(p.queuedBytes, total - 10)
+    XCTAssertFalse(p.isEmpty)
+    var rest: [UInt8] = []
+    while !p.isEmpty {
+      let n = p.writeSlice { raw in rest.append(contentsOf: raw); return raw.count }
+      XCTAssertGreaterThan(n, 0)
+      p.didSend(n)
+    }
+    XCTAssertTrue(p.isEmpty)
+    XCTAssertEqual(p.queuedBytes, 0)
+    XCTAssertEqual(p.outputOffset, 0)
+    var line = JSONLineBuffer()
+    let frames = try? line.append(Data(head + rest))
+    XCTAssertEqual(frames?.compactMap { $0["id"]?.stringValue }, ["1", "2"])
+
+    let slow = peer()
+    let big = JSONValue.object(["event": .string("x"), "data": .string(String(repeating: "y", count: 60_000))])
+    for _ in 0..<4 { slow.enqueue(big) }
+    XCTAssertFalse(slow.dead)
+    let queued4 = slow.queuedBytes
+    // Drain 100 KiB: the drained prefix compacts once past 64 KiB and stays
+    // bounded afterwards; the cap counts only undelivered bytes.
+    var drained = 0
+    while drained < 100 * 1024 {
+      let n = slow.writeSlice { raw in min(16_384, raw.count) }
+      slow.didSend(n)
+      drained += n
+    }
+    XCTAssertLessThanOrEqual(slow.outputOffset, 65_536)
+    XCTAssertEqual(slow.queuedBytes, slow.output.count - slow.outputOffset)
+    XCTAssertEqual(slow.queuedBytes, queued4 - drained)
+    // Drained bytes must not count toward the cap: keep accepting until the
+    // slow reader trips it, then show accepted + drained exceeds the limit.
+    var accepted = 0
+    while !slow.dead, accepted < 10 {
+      slow.enqueue(big)
+      if !slow.dead { accepted += 1 }
+    }
+    XCTAssertTrue(slow.dead)
+    XCTAssertLessThanOrEqual(slow.queuedBytes, 262_144)
+    // Total bytes ever accepted exceed the cap: only possible because drained
+    // bytes are excluded from the 256 KiB accounting.
+    let frameSize = (try? JSONWire.encode(big))?.count ?? 60_000
+    XCTAssertGreaterThan(queued4 + accepted * frameSize, 262_144)
+  }
   func testSlowPeerQueueIsBounded() {
     let slow = peer()
     let healthy = peer()

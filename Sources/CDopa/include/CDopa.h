@@ -4,6 +4,11 @@
 #include <sys/types.h>
 int dopa_install_signals(void);
 int dopa_stop_requested(void);
+// Read end of the stop self-pipe for poll()/select() loops. A stop signal
+// makes it readable; readers drain it and re-check dopa_stop_requested().
+// Returns -1 when the pipe cannot be created (callers fall back to bounded
+// polling). Never closed by readers.
+int dopa_stop_fd(void);
 int dopa_openat(int directory, const char *path, int flags, mode_t mode);
 int dopa_full_sync(int fd);
 int dopa_unix_socket(void);

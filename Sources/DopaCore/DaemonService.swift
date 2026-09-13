@@ -5,6 +5,68 @@ import DopaProtocol
 import Foundation
 
 public enum DaemonService {
+  /// Delivers one pending `status.changed` broadcast, if any, to subscribed
+  /// peers. The frame is encoded at most once and shared; when no peer
+  /// subscribes, nothing is encoded and `snapshot()` (which re-reads power
+  /// state) is not even built, so CLI-only acquire/release performs zero
+  /// notification encodes. The pending change is still consumed because a
+  /// later `status.subscribe` response already contains the current complete
+  /// snapshot. The `encode` parameter exists so tests can count encodings;
+  /// production passes `JSONWire.encode`.
+  static func deliverBroadcast(
+    engine: DaemonEngine,
+    peers: [Int32: ServicePeer],
+    encode: (JSONValue) throws -> Data = JSONWire.encode
+  ) {
+    guard engine.changed else { return }
+    engine.changed = false
+    let targets = peers.values.filter { $0.subscribed }
+    guard !targets.isEmpty else { return }
+    let event = JSONValue.object([
+      "event": .string("status.changed"),
+      "data": .object([
+        "instanceId": .string(engine.instanceID), "revision": .string(String(engine.revision)),
+        "snapshot": engine.snapshot(),
+      ]),
+    ])
+    do {
+      let shared = try encode(event)
+      for peer in targets { peer.enqueueSnapshot(shared) }
+    } catch {
+      // Unreachable for engine-built events; keep enqueue's dead-marking.
+      for peer in targets { peer.dead = true }
+    }
+  }
+
+  /// Milliseconds until the next timer-driven work, for the run loop's poll()
+  /// timeout: lid recheck (only while a lid-close session exists), power
+  /// recheck (only while peers exist), and each peer's hello / partial-frame
+  /// deadline. Returns -1 when nothing is pending, so an idle daemon sleeps
+  /// until socket or stop-pipe activity. Communication wakes poll() regardless
+  /// of this timeout, and stop signals arrive through the stop self-pipe even
+  /// when the timeout is infinite, so no deadline or notification is missed.
+  static func pollTimeoutMilliseconds(
+    now: Date, nextLid: Date, nextCheck: Date,
+    peers: [Int32: ServicePeer], hasLidSessions: Bool
+  ) -> Int32 {
+    var earliest: TimeInterval?
+    func consider(_ date: Date) {
+      let remaining = date.timeIntervalSince(now)
+      if earliest == nil || remaining < earliest! { earliest = remaining }
+    }
+    if hasLidSessions { consider(nextLid) }
+    if !peers.isEmpty { consider(nextCheck) }
+    for peer in peers.values {
+      if !peer.hello { consider(peer.created.addingTimeInterval(5)) }
+      if let partial = peer.partialSince { consider(partial.addingTimeInterval(5)) }
+    }
+    guard let remaining = earliest else { return -1 }
+    if remaining <= 0 { return 0 }
+    // poll() takes whole milliseconds. Truncating a positive sub-millisecond
+    // remainder to zero spins until the deadline, so round upward.
+    return Int32(min((remaining * 1000).rounded(.up), Double(Int32.max)))
+  }
+
   public static func run(
     statePath: String = "/var/db/dopa", socketPath: String = "/var/run/dopa/control.sock",
     allowedUID: uid_t, power: any Power, controls: any Controls, requireRoot: Bool = true,
@@ -57,30 +119,48 @@ public enum DaemonService {
     func publish() {
       let events = engine.takeEvents()
       for (owner, event) in events { peers[owner]?.enqueue(event) }
-      if engine.changed {
-        engine.changed = false
-        let event = JSONValue.object([
-          "event": .string("status.changed"),
-          "data": .object([
-            "instanceId": .string(engine.instanceID), "revision": .string(String(engine.revision)),
-            "snapshot": engine.snapshot(),
-          ]),
-        ])
-        for peer in peers.values where peer.subscribed { peer.enqueue(event) }
-      }
+      DaemonService.deliverBroadcast(engine: engine, peers: peers)
     }
+    // Listener plus stop pipe plus at most 64 peers; backing storage is reused.
+    var polls: [pollfd] = []
+    polls.reserveCapacity(67)
+    // Reused read work buffer; only the prefix written by each read() is read.
+    var bytes = [UInt8](repeating: 0, count: 16_384)
+    // Stop self-pipe: a signal makes it readable so poll() wakes immediately
+    // even with an infinite computed timeout. The flag stays authoritative;
+    // a missing pipe only falls back to bounded polling.
+    let stopFD = dopa_stop_fd()
+    var drainByte: UInt8 = 0
     while dopa_stop_requested() == 0 {
-      var polls = [pollfd(fd: fd, events: Int16(POLLIN), revents: 0)]
+      let hasLidSessions = engine.sessions.values.contains { $0.options.stopOnLidClose }
+      let timeout = stopFD < 0 ? 50 : DaemonService.pollTimeoutMilliseconds(
+        now: Date(), nextLid: nextLid, nextCheck: nextCheck,
+        peers: peers, hasLidSessions: hasLidSessions)
+      // Rebuild registrations from scratch so accept/close/FD reuse is reflected.
+      polls.removeAll(keepingCapacity: true)
+      polls.append(pollfd(fd: fd, events: Int16(POLLIN), revents: 0))
+      if stopFD >= 0 {
+        polls.append(pollfd(fd: stopFD, events: Int16(POLLIN), revents: 0))
+      }
       for peer in peers.values {
         polls.append(
           pollfd(
-            fd: peer.fd.value, events: Int16(POLLIN) | (peer.output.isEmpty ? 0 : Int16(POLLOUT)),
+            fd: peer.fd.value, events: Int16(POLLIN) | (peer.isEmpty ? 0 : Int16(POLLOUT)),
             revents: 0))
       }
-      let result = poll(&polls, nfds_t(polls.count), 50)
+      let result = poll(&polls, nfds_t(polls.count), timeout)
       if result < 0 && errno != EINTR { throw systemError("poll daemon") }
       if polls[0].revents & Int16(POLLERR | POLLHUP | POLLNVAL) != 0 {
         throw DopaError("daemon listener failed")
+      }
+      var cursor = polls.dropFirst()
+      if stopFD >= 0, let stopEntry = cursor.first, stopEntry.fd == stopFD {
+        // Drain stop notifications; the loop condition re-checks the flag.
+        // HUP/NVAL on our own pipe cannot occur; ignore them either way.
+        if stopEntry.revents & Int16(POLLIN) != 0 {
+          while Darwin.read(stopFD, &drainByte, 1) > 0 {}
+        }
+        cursor = cursor.dropFirst()
       }
       if polls[0].revents & Int16(POLLIN) != 0 {
         for _ in 0..<16 {
@@ -98,10 +178,9 @@ public enum DaemonService {
           peers[client] = ServicePeer(fd: descriptor, uid: uid, pid: pid)
         }
       }
-      for entry in polls.dropFirst() {
+      for entry in cursor {
         guard let peer = peers[entry.fd] else { continue }
         if entry.revents & Int16(POLLIN | POLLHUP) != 0 && !peer.closing {
-          var bytes = [UInt8](repeating: 0, count: 16_384)
           let count = Darwin.read(entry.fd, &bytes, bytes.count)
           if count > 0 {
             do {
@@ -133,15 +212,8 @@ public enum DaemonService {
             peer.dead = true
           }
         }
-        if !peer.output.isEmpty {
-          let sent = peer.output.withUnsafeBytes {
-            Darwin.write(entry.fd, $0.baseAddress, $0.count)
-          }
-          if sent > 0 {
-            peer.output.removeFirst(sent)
-          } else if sent < 0 && errno != EAGAIN && errno != EINTR {
-            peer.dead = true
-          }
+        if !peer.isEmpty {
+          peer.flush { raw in Darwin.write(entry.fd, raw.baseAddress, raw.count) }
         }
         if entry.revents & Int16(POLLERR | POLLNVAL) != 0 { peer.dead = true }
       }
@@ -149,7 +221,7 @@ public enum DaemonService {
       for (id, peer) in peers {
         if (!peer.hello && now.timeIntervalSince(peer.created) > 5)
           || (peer.partialSince.map { now.timeIntervalSince($0) > 5 } ?? false)
-          || (peer.closing && peer.output.isEmpty) || peer.dead
+          || (peer.closing && peer.isEmpty) || peer.dead
         {
           engine.disconnect(id)
           peers.removeValue(forKey: id)
@@ -170,7 +242,7 @@ public enum DaemonService {
     publish()
     // Best effort event delivery; restoration never waits for a slow reader.
     for peer in peers.values {
-      _ = peer.output.withUnsafeBytes { Darwin.write(peer.fd.value, $0.baseAddress, $0.count) }
+      _ = peer.writeSlice { raw in Darwin.write(peer.fd.value, raw.baseAddress, raw.count) }
     }
   }
 }
@@ -182,7 +254,14 @@ final class ServicePeer {
   let created = Date()
   var partialSince: Date?
   var input = JSONLineBuffer()
+  // Undelivered bytes are output[outputOffset...]; the drained prefix is
+  // compacted or dropped so partial writes do not copy on every send.
   var output = Data()
+  var outputOffset = 0
+  // Length of the trailing broadcast snapshot frame, if the output tail is
+  // exactly one fully unsent snapshot that a newer broadcast may replace.
+  // Any other append, send, or reset invalidates it (see didSend/enqueue).
+  var pendingSnapshotBytes: Int?
   var hello = false
   var name = "unknown"
   var subscribed = false
@@ -195,13 +274,83 @@ final class ServicePeer {
     self.uid = uid
     self.pid = pid
   }
+  /// Bytes queued but not yet delivered; the cap accounting uses this, not
+  /// output.count, which also covers the drained prefix.
+  var queuedBytes: Int { output.count - outputOffset }
+  var isEmpty: Bool { outputOffset == output.count }
+  /// Hands only undelivered bytes to a write call.
+  func writeSlice(_ write: (UnsafeRawBufferPointer) -> Int) -> Int {
+    let offset = outputOffset
+    guard output.count > offset else { return 0 }
+    return output.withUnsafeBytes { raw in
+      write(UnsafeRawBufferPointer(rebasing: raw[offset...]))
+    }
+  }
+  /// Records a successful partial write and reclaims drained storage.
+  func didSend(_ count: Int) {
+    guard count > 0 else { return }
+    outputOffset += count
+    if outputOffset == output.count {
+      // Full drain: reset so queued capacity is released.
+      output = Data()
+      outputOffset = 0
+      pendingSnapshotBytes = nil
+    } else if outputOffset > 65_536 {
+      // Compact the drained prefix instead of copying on every partial write.
+      // A tracked trailing snapshot shifts with it; its length stays valid.
+      output.removeFirst(outputOffset)
+      outputOffset = 0
+    }
+  }
+  /// Attempts one non-blocking write and updates queue state. Recoverable
+  /// kernel backpressure and signal interruption leave the exact unsent slice
+  /// intact for the next POLLOUT wakeup.
+  @discardableResult
+  func flush(
+    _ write: (UnsafeRawBufferPointer) -> Int,
+    errorCode: () -> Int32 = { errno }
+  ) -> Int {
+    let sent = writeSlice(write)
+    if sent > 0 {
+      didSend(sent)
+    } else if sent < 0 {
+      let code = errorCode()
+      if code != EAGAIN && code != EINTR { dead = true }
+    }
+    return sent
+  }
   func enqueue(_ value: JSONValue) {
     guard !dead else { return }
-    guard let data = try? JSONWire.encode(value), output.count + data.count <= 262_144 else {
+    guard let data = try? JSONWire.encode(value), queuedBytes + data.count <= 262_144 else {
+      dead = true
+      return
+    }
+    // Anything appended after a tracked snapshot breaks the exact-tail
+    // shape, so later broadcasts keep both frames in order.
+    pendingSnapshotBytes = nil
+    output.append(data)
+  }
+  /// Broadcast fast path: append bytes already encoded by the publisher.
+  /// Coalesces with a previous broadcast snapshot when that frame is still
+  /// the complete, fully unsent tail: the older snapshot is dropped and only
+  /// the newest is delivered. Anything else in between (a response, a
+  /// session.ended, or an already-sent prefix) disables coalescing for that
+  /// round and both frames are kept in order, so causal order is never
+  /// rewritten and partially sent bytes are never replaced.
+  func enqueueSnapshot(_ data: Data) {
+    guard !dead else { return }
+    if let old = pendingSnapshotBytes,
+      outputOffset <= output.count - old
+    {
+      output.removeLast(old)
+      pendingSnapshotBytes = nil
+    }
+    guard queuedBytes + data.count <= 262_144 else {
       dead = true
       return
     }
     output.append(data)
+    pendingSnapshotBytes = data.count
   }
 }
 
@@ -256,7 +405,16 @@ final class DaemonEngine {
     }
     checked = timestamp()
   }
-  private func timestamp() -> String { ISO8601DateFormatter().string(from: Date()) }
+  // Reused instead of allocating per timestamp() call; DaemonEngine is confined
+  // to the daemon's single serial run-loop thread (DaemonService.run).
+  // ISO8601DateFormatter is locale-independent (fixed en_US_POSIX-equivalent
+  // output); the zero-offset timezone is set explicitly to pin "Z" output.
+  private let timestampFormatter: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.timeZone = TimeZone(secondsFromGMT: 0)
+    return formatter
+  }()
+  private func timestamp() -> String { timestampFormatter.string(from: Date()) }
   private func errorValue(_ code: String, _ message: String, details: JSONValue? = nil) -> JSONValue
   {
     var object: [String: JSONValue] = ["code": .string(code), "message": .string(message)]
