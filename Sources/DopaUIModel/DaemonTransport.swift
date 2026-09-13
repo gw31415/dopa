@@ -21,7 +21,7 @@ public protocol DaemonTransport: Sendable {
 /// Owns the synchronous socket exclusively on one dedicated serial queue.
 /// No socket wait, connection, or request runs on the main actor.
 public final class SocketTransport: DaemonTransport, @unchecked Sendable {
-  private let queue = DispatchQueue(label: "dev.dopa.ui.socket", qos: .userInitiated)
+  private let queue = DispatchQueue(label: "dev.amas.dopa.ui.socket", qos: .userInitiated)
   private let path: String
   private let requireRoot: Bool
   // Access only inside `queue`.

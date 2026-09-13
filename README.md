@@ -91,12 +91,14 @@ sudo .build/release/dopa-daemon restart
 
 | パス | 用途 |
 | --- | --- |
-| `/Library/LaunchDaemons/dev.dopa.daemon.plist` | LaunchDaemon 定義 |
-| `/Library/PrivilegedHelperTools/dev.dopa.daemon` | root 所有の実行ファイル |
+| `/Library/LaunchDaemons/dev.amas.dopa.daemon.plist` | LaunchDaemon 定義 |
+| `/Library/PrivilegedHelperTools/dev.amas.dopa.daemon` | root 所有の実行ファイル |
 | `/var/run/dopa/control.sock` | 公開 Unix domain socket |
 | `/var/db/dopa/config.json` | 許可 UID |
 | `/var/db/dopa/lock` | 電源操作を行うプロセスの排他 |
 | `/var/db/dopa/session` | 未完了の復元記録 |
+
+旧版の `dev.dopa.daemon` サービスが導入済みの場合、新しい `dopa-daemon install` は設定済みユーザーを保持したまま旧サービスを安全に停止・削除し、`dev.amas.dopa.daemon` へ移行します。新旧のlaunchdサービスを同時には起動しません。
 
 ## 公開 API
 

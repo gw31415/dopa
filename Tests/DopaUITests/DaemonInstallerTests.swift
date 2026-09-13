@@ -93,7 +93,7 @@ final class DaemonInstallerTests: XCTestCase {
     try await installer.manage(.start)
     let captured = await capture.capturedValue()
     let command = try XCTUnwrap(captured)
-    XCTAssertTrue(command.contains("PrivilegedHelperTools/dev.dopa.daemon"))
+    XCTAssertTrue(command.contains("PrivilegedHelperTools/dev.amas.dopa.daemon"))
     XCTAssertTrue(command.hasSuffix(" start"))
   }
 }
@@ -114,8 +114,8 @@ private struct Fixture {
     root = FileManager.default.temporaryDirectory
       .appendingPathComponent("dopa-installer-tests-\(UUID().uuidString)")
     bundle = root.appendingPathComponent("Dopa.app")
-    plist = root.appendingPathComponent("LaunchDaemons/dev.dopa.daemon.plist")
-    executable = root.appendingPathComponent("PrivilegedHelperTools/dev.dopa.daemon")
+    plist = root.appendingPathComponent("LaunchDaemons/dev.amas.dopa.daemon.plist")
+    executable = root.appendingPathComponent("PrivilegedHelperTools/dev.amas.dopa.daemon")
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
   }
 

@@ -98,9 +98,9 @@ public struct DaemonLayout: Equatable, Sendable {
   public let expectedGroupGID: gid_t
 
   public init(
-    serviceLabel: String = "dev.dopa.daemon",
-    plistPath: String = "/Library/LaunchDaemons/dev.dopa.daemon.plist",
-    executablePath: String = "/Library/PrivilegedHelperTools/dev.dopa.daemon",
+    serviceLabel: String = "dev.amas.dopa.daemon",
+    plistPath: String = "/Library/LaunchDaemons/dev.amas.dopa.daemon.plist",
+    executablePath: String = "/Library/PrivilegedHelperTools/dev.amas.dopa.daemon",
     configPath: String = "/var/db/dopa/config.json",
     statePath: String = "/var/db/dopa",
     socketPath: String = "/var/run/dopa/control.sock",
@@ -118,6 +118,10 @@ public struct DaemonLayout: Equatable, Sendable {
   }
 
   public static let system = DaemonLayout()
+  public static let legacySystem = DaemonLayout(
+    serviceLabel: "dev.dopa.daemon",
+    plistPath: "/Library/LaunchDaemons/dev.dopa.daemon.plist",
+    executablePath: "/Library/PrivilegedHelperTools/dev.dopa.daemon")
 
   public static func temporary(
     rootDirectory: URL,
@@ -126,9 +130,9 @@ public struct DaemonLayout: Equatable, Sendable {
   ) -> DaemonLayout {
     let root = rootDirectory.path
     return DaemonLayout(
-      serviceLabel: "dev.dopa.daemon.test",
-      plistPath: root + "/LaunchDaemons/dev.dopa.daemon.plist",
-      executablePath: root + "/PrivilegedHelperTools/dev.dopa.daemon",
+      serviceLabel: "dev.amas.dopa.daemon.test",
+      plistPath: root + "/LaunchDaemons/dev.amas.dopa.daemon.plist",
+      executablePath: root + "/PrivilegedHelperTools/dev.amas.dopa.daemon",
       configPath: root + "/state/config.json",
       statePath: root + "/state",
       socketPath: root + "/run/control.sock",
@@ -359,6 +363,75 @@ public final class DaemonManager: @unchecked Sendable {
     }
   }
 
+  /// Replaces an installation that used an older launchd identity while
+  /// preserving its configured user. The legacy service is shut down through
+  /// its own label before the current service is installed, so both identities
+  /// can never own the shared runtime socket at the same time.
+  public func installReplacingLegacy(
+    executableURL: URL,
+    user: String? = nil,
+    legacyLayout: DaemonLayout = .legacySystem,
+    environment: [String: String] = ProcessInfo.processInfo.environment
+  ) throws {
+    try checkRoot()
+    guard layout != legacyLayout, !(try hasIdentityFiles()) else {
+      try install(executableURL: executableURL, user: user, environment: environment)
+      return
+    }
+
+    let legacyManager = DaemonManager(
+      layout: legacyLayout,
+      commandRunner: commandRunner,
+      shutdownRequester: shutdownRequester,
+      readinessChecker: readinessChecker,
+      requireRoot: requireRoot)
+    guard try legacyManager.hasIdentityFiles() else {
+      try install(executableURL: executableURL, user: user, environment: environment)
+      return
+    }
+
+    let legacyIdentity = try legacyManager.snapshotIdentityFiles()
+    guard legacyIdentity.allSatisfy(\.exists) else {
+      throw DaemonManagementError.invalidConfiguration(
+        "legacy daemon installation is incomplete; refusing to migrate it")
+    }
+    let legacyConfiguration = try DaemonConfiguration.loadSecure(
+      from: legacyLayout.configPath,
+      ownerUID: legacyLayout.expectedOwnerUID,
+      groupGID: legacyLayout.expectedGroupGID,
+      mode: 0o600)
+    if let user {
+      let requestedUID = try DaemonUserResolver.resolve(user)
+      guard requestedUID == legacyConfiguration.allowedUID else {
+        throw DaemonManagementError.invalidConfiguration(
+          "allowed user is already configured; uninstall before changing it")
+      }
+    }
+
+    // Validate the replacement before taking the working legacy service down.
+    _ = try readExecutable(at: executableURL.path)
+    let preservedUser = String(legacyConfiguration.allowedUID)
+    try legacyManager.uninstall()
+    do {
+      try install(
+        executableURL: executableURL, user: preservedUser, environment: environment)
+    } catch {
+      let migrationError = error
+      if let managementError = migrationError as? DaemonManagementError,
+        case .rollbackFailed = managementError {
+        throw migrationError
+      }
+      do {
+        try legacyManager.install(
+          executableURL: executableURL, user: preservedUser, environment: environment)
+      } catch {
+        throw DaemonManagementError.rollbackFailed(
+          "identity migration failed (\(migrationError)); legacy service restoration failed (\(error))")
+      }
+      throw migrationError
+    }
+  }
+
   public func uninstall() throws {
     try checkRoot()
     let lock = try acquireManagementLock()
@@ -538,6 +611,14 @@ public final class DaemonManager: @unchecked Sendable {
     try [
       snapshot(layout.plistPath), snapshot(layout.executablePath), snapshot(layout.configPath),
     ]
+  }
+
+  private func snapshotIdentityFiles() throws -> [FileSnapshot] {
+    try [snapshot(layout.plistPath), snapshot(layout.executablePath)]
+  }
+
+  private func hasIdentityFiles() throws -> Bool {
+    try snapshotIdentityFiles().contains(where: \.exists)
   }
 
   private func snapshot(_ path: String) throws -> FileSnapshot {

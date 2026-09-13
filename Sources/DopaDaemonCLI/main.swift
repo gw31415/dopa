@@ -181,7 +181,7 @@ private func run() throws {
     try requireRoot(for: "install")
     let manager = DaemonManager()
     do {
-      try manager.install(executableURL: try executableURL(), user: user)
+      try manager.installReplacingLegacy(executableURL: try executableURL(), user: user)
     } catch {
       throw DaemonCLIError("install failed: \(error)", status: 1)
     }

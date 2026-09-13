@@ -3,8 +3,8 @@ import Darwin
 import CryptoKit
 
 struct DaemonInstallationLayout: Sendable {
-  var plistURL = URL(fileURLWithPath: "/Library/LaunchDaemons/dev.dopa.daemon.plist")
-  var executableURL = URL(fileURLWithPath: "/Library/PrivilegedHelperTools/dev.dopa.daemon")
+  var plistURL = URL(fileURLWithPath: "/Library/LaunchDaemons/dev.amas.dopa.daemon.plist")
+  var executableURL = URL(fileURLWithPath: "/Library/PrivilegedHelperTools/dev.amas.dopa.daemon")
   var ownerUID: uid_t = 0
   var ownerGID: gid_t = 0
 }

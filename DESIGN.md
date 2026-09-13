@@ -83,12 +83,14 @@ dopa-daemon run
 
 | パス | 用途・所有権 |
 | --- | --- |
-| `/Library/LaunchDaemons/dev.dopa.daemon.plist` | launchd 定義。root:wheel、0644 |
-| `/Library/PrivilegedHelperTools/dev.dopa.daemon` | `dopa-daemon` の配置コピー。root:wheel、0755 |
+| `/Library/LaunchDaemons/dev.amas.dopa.daemon.plist` | launchd 定義。root:wheel、0644 |
+| `/Library/PrivilegedHelperTools/dev.amas.dopa.daemon` | `dopa-daemon` の配置コピー。root:wheel、0755 |
 | `/var/db/dopa/config.json` | 許可 UID と設定バージョン。root 専用 |
 | `/var/db/dopa/lock`、`session` | 排他と既存形式の復元記録。ディレクトリ 0700、ファイル 0600 |
 | `/var/db/dopa/management.lock` | install / uninstall の同時実行を直列化。root 専用。デーモンの排他とは別 |
 | `/var/run/dopa/control.sock` | 公開 IPC。親は root:wheel、0755、ソケットは root:wheel、0666 |
+
+旧サービス識別子 `dev.dopa.daemon` は移行検出専用とする。新しいdaemonのinstallは、旧管理ファイルを検出した場合に既存セッションと電源設定の復元を確認して旧サービスをbootoutし、許可ユーザーを保持して `dev.amas.dopa.daemon` を導入する。新サービスの導入が通常エラーで失敗した場合は旧識別子のサービスを復元し、新旧サービスを同時には起動しない。
 
 ソケットの 0666 は UID 認証の代わりではない。接続直後に OS から得た UID を検査し、許可ユーザーと root 以外は JSON を処理せず切断する。書き換え可能なソケットファイルを利用者のディレクトリに置かない。クライアントは root 所有の親パス・ソケットと接続相手 UID 0 を検証する。ジャーナルへのアクセスはデーモンだけが持つ。
 

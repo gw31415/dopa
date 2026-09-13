@@ -134,7 +134,7 @@ final class ManagementTests: XCTestCase {
       <plist version="1.0">
       <dict>
         <key>Label</key>
-        <string>dev.dopa.daemon.test</string>
+        <string>dev.amas.dopa.daemon.test</string>
         <key>ProgramArguments</key>
         <array>
           <string>\(fixture.layout.executablePath)</string>
@@ -197,6 +197,55 @@ final class ManagementTests: XCTestCase {
     XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: fixture.layout.plistPath)), oldPlist)
     XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: fixture.layout.configPath)), oldConfig)
     XCTAssertEqual(shutdowns.value, 2, "new service cleanup must be confirmed before rollback")
+  }
+
+  func testLegacyServiceIdentityIsReplacedAndConfiguredUserIsPreserved() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let legacyLayout = DaemonLayout(
+      serviceLabel: "dev.dopa.daemon.test",
+      plistPath: fixture.root.appendingPathComponent(
+        "LaunchDaemons/dev.dopa.daemon.plist").path,
+      executablePath: fixture.root.appendingPathComponent(
+        "PrivilegedHelperTools/dev.dopa.daemon").path,
+      configPath: fixture.layout.configPath,
+      statePath: fixture.layout.statePath,
+      socketPath: fixture.layout.socketPath,
+      expectedOwnerUID: geteuid(),
+      expectedGroupGID: getegid())
+    let runner = FakeRunner()
+    let shutdowns = Counter()
+    let legacyManager = DaemonManager(
+      layout: legacyLayout,
+      commandRunner: runner,
+      shutdownRequester: { _ in shutdowns.value += 1 },
+      readinessChecker: { _ in true },
+      requireRoot: false)
+    try legacyManager.install(
+      executableURL: fixture.source, user: String(geteuid()))
+    runner.calls.removeAll()
+
+    let currentManager = manager(
+      fixture, runner: runner, shutdownCount: shutdowns)
+    try currentManager.installReplacingLegacy(
+      executableURL: fixture.source,
+      legacyLayout: legacyLayout,
+      environment: [:])
+
+    XCTAssertEqual(shutdowns.value, 1)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: legacyLayout.plistPath))
+    XCTAssertFalse(FileManager.default.fileExists(atPath: legacyLayout.executablePath))
+    XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.layout.plistPath))
+    XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.layout.executablePath))
+    XCTAssertEqual(
+      try DaemonConfiguration.load(from: fixture.layout.configPath).allowedUID,
+      geteuid())
+    XCTAssertEqual(
+      runner.calls.map(\.arguments),
+      [
+        ["bootout", legacyLayout.serviceTarget],
+        ["bootstrap", "system", fixture.layout.plistPath],
+      ])
   }
 
   func testFreshBootstrapFailureKeepsFilesWhenServiceCannotBeStopped() throws {
