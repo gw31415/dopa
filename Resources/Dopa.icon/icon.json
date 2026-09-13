@@ -1,60 +1,183 @@
 {
   "fill": {
     "linear-gradient": [
-      "srgb:0.29020,0.31765,0.71765,1.00000",
-      "srgb:0.09020,0.11373,0.36863,1.00000"
+      "srgb:0.29804,0.30196,0.70196,1.00000",
+      "srgb:0.09020,0.10588,0.32549,1.00000"
     ]
   },
   "groups": [
     {
-      "name": "Wake light",
       "layers": [
         {
-          "name": "Wake light",
-          "image-name": "light.svg",
-          "fill": {
-            "linear-gradient": [
-              "srgb:1.00000,0.89412,0.60784,1.00000",
-              "srgb:1.00000,0.60784,0.27843,1.00000"
-            ]
-          },
-          "glass": true
+          "fill-specializations": [
+            {
+              "value": {
+                "linear-gradient": [
+                  "srgb:0.43922,0.25882,0.17647,1.00000",
+                  "srgb:0.61176,0.36863,0.21176,1.00000"
+                ]
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "extended-gray:0.40000,1.00000"
+              }
+            }
+          ],
+          "glass": true,
+          "image-name": "coffee.svg",
+          "name": "Coffee"
         }
       ],
-      "lighting": "individual",
-      "shadow": {
-        "kind": "neutral",
-        "opacity": 0.35
-      },
+      "lighting": "combined",
+      "name": "Coffee",
       "translucency": {
-        "enabled": true,
-        "value": 0.12
-      }
+        "enabled": false,
+        "value": 0.08
+      },
+      "shadow-specializations": [
+        {
+          "value": {
+            "kind": "neutral",
+            "opacity": 0.2
+          }
+        },
+        {
+          "appearance": "tinted",
+          "value": {
+            "kind": "neutral",
+            "opacity": 0.08
+          }
+        }
+      ]
     },
     {
-      "name": "Awake moon",
       "layers": [
         {
-          "name": "Awake moon",
+          "glass": true,
+          "image-name": "rim.svg",
+          "name": "Cup rim",
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:1.00000,0.98039,0.93725,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:1.00000,0.98039,0.93725,1.00000"
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "extended-gray:1.00000,1.00000"
+              }
+            }
+          ]
+        },
+        {
+          "glass": true,
+          "image-name": "cup.svg",
+          "name": "Cup ceramic",
+          "fill-specializations": [
+            {
+              "value": {
+                "linear-gradient": [
+                  "srgb:1.00000,0.98039,0.93725,1.00000",
+                  "srgb:0.90980,0.84314,0.72549,1.00000"
+                ]
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "extended-gray:0.95000,1.00000"
+              }
+            }
+          ]
+        }
+      ],
+      "lighting": "combined",
+      "name": "Cup",
+      "translucency": {
+        "enabled": false,
+        "value": 0.08
+      },
+      "shadow-specializations": [
+        {
+          "value": {
+            "kind": "neutral",
+            "opacity": 0.25
+          }
+        },
+        {
+          "appearance": "tinted",
+          "value": {
+            "kind": "neutral",
+            "opacity": 0.08
+          }
+        }
+      ]
+    },
+    {
+      "layers": [
+        {
+          "glass": true,
           "image-name": "moon.svg",
-          "fill": {
-            "linear-gradient": [
-              "srgb:0.94118,0.97647,1.00000,1.00000",
-              "srgb:0.58431,0.80784,1.00000,1.00000"
-            ]
-          },
-          "glass": true
+          "name": "Moon",
+          "fill-specializations": [
+            {
+              "value": {
+                "linear-gradient": [
+                  "srgb:0.88235,0.97255,1.00000,1.00000",
+                  "srgb:0.55686,0.74902,1.00000,1.00000"
+                ]
+              }
+            },
+            {
+              "appearance": "tinted",
+              "value": {
+                "solid": "extended-gray:0.72000,1.00000"
+              }
+            }
+          ]
         }
       ],
       "lighting": "individual",
-      "shadow": {
-        "kind": "neutral",
-        "opacity": 0.35
-      },
-      "translucency": {
-        "enabled": true,
-        "value": 0.3
-      }
+      "name": "Moon",
+      "shadow-specializations": [
+        {
+          "value": {
+            "kind": "neutral",
+            "opacity": 0.25
+          }
+        },
+        {
+          "appearance": "tinted",
+          "value": {
+            "kind": "neutral",
+            "opacity": 0.08
+          }
+        }
+      ],
+      "translucency-specializations": [
+        {
+          "value": {
+            "enabled": true,
+            "value": 0.22
+          }
+        },
+        {
+          "appearance": "tinted",
+          "value": {
+            "enabled": false,
+            "value": 0.0
+          }
+        }
+      ]
     }
   ],
   "supported-platforms": {

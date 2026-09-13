@@ -1,31 +1,39 @@
 # Dopa icon
 
-「夜を越えて灯る」を表す、淡い青の月と琥珀色の光。Caffeineのカップ、Amphetamineのカプセルとは異なる輪郭と色の組み合わせにした。
+## 月とコーヒー
 
-- `Dopa.svg`: 1024 × 1024の統合SVG原稿。背景・月・光の3グループ。
-- `moon.svg` / `light.svg`: Icon Composerに渡す、透明背景の前景SVG。月は1つの短いパス、光は1つの円。2ファイル合計556 bytes。
-- `../../Resources/Dopa.icon`: アプリに組み込む正式なIcon Composerドキュメント。`Assets/`内に同じSVGを保持する。
-- `renders/`: Icon Composer同梱の`ictool`で出力したmacOSの確認用PNG。ビルドの入力には使用しない。
-- `preview.html`: SVG原稿と各レンディションをブラウザで見比べるためのローカルプレビュー。
+Dopaの正式なアプリアイコンは、カップから注いだコーヒーが三日月へ流れ、手前へ長く垂れるシンボル。Caffeineのカップ単体やAmphetamineのカプセルとは異なり、月と注ぐ動作の組み合わせでDopaを表す。
 
-SVGは直接記述したベクターで、画像のトレース、埋め込みビットマップ、フォント、フィルターを含まない。原稿にシステムの角丸マスク、影、ガラスのハイライトは焼き込まない。プレビューページのSVG表示にだけCSSの角丸を適用している。
+`Dopa.svg`は形状と配色の統合原稿。背景・月・カップ・コーヒーを編集可能なグループに分け、画像トレース、埋め込みビットマップ、フォント、フィルターを含まない。`moon-coffee-preview.html`では原稿を大きな表示と128 / 64 / 32pxで確認できる。
 
 ## Icon Composer
 
-背景はインディゴのグラデーション。前景は独立した2グループとし、各SVGにLiquid Glassを適用した。月の透過は30%、光は12%、両方の影はNeutral 35%。Defaultの前景色は月が`#F0F9FF → #95CEFF`、光が`#FFE49B → #FF9B47`。DarkとMonoはIcon Composerの自動適応を使う。色を失っても、月と光は離れた輪郭として識別できる。
+正式なビルド入力は`../../Resources/Dopa.icon`。背景はIcon Composerのインディゴグラデーションで、前景は次の3グループ、4レイヤーで構成する。
 
-編集は`Resources/Dopa.icon`をIcon Composerで開く。形を変える場合は`moon.svg` / `light.svg`を編集し、`.icon/Assets/`内の対応ファイルと`Dopa.svg`内の形状も同時に更新する。原稿と`.icon`内のSVGは一致させる。ドキュメント構造や素材の変更はIcon Composerで保存する。
+1. `Coffee`
+   - `coffee.svg`: カップ内の液面、注ぐ流れ、独立した滴
+2. `Cup`
+   - `rim.svg`: 白いリム
+   - `cup.svg`: 陶器の胴体と取っ手
+3. `Moon`
+   - `moon.svg`: 三日月
 
-Icon ComposerのUIでDefault / Dark / Monoを確認済み。`ictool`でDefault / Dark / Clear Light / Clear Dark / Tinted Light / Tinted Darkを出力して確認した。プレビューPNGは固定の描画結果で、OS上では壁紙・色・照明・サイズなどに応じて描画が変わる。
+各素材は1024×1024の共通viewBoxと透明背景を使う。`artwork/icon/`のSVGと`.icon/Assets/`内の対応ファイルは同一に保つ。背景矩形、システムの角丸、影、ぼかし、鏡面反射は素材へ焼き込まず、Icon Composerが描画する。
+
+Defaultの色は、背景`#4C4DB3 → #171B53`、月`#E1F8FF → #8EBFFF`、陶器`#FFFAEF → #E8D7B9`、コーヒー`#70422D → #9C5E36`。CoffeeとCupは不透明度を保ちながらSpecularを有効にし、Moonには22%のTranslucencyを与える。Darkも同じレイヤー構造を使い、リムだけは背景色がGlassの縁へ混ざらないよう暖白色を明示する。
+
+Mono / Tintedでは小さいDark表示でも形が重ならないよう、リム`1.00`、陶器`0.95`、月`0.72`、コーヒー`0.40`の専用グレースケールを使う。各グループの影は8%へ抑え、MoonのTranslucencyを無効にして、カップ、月、コーヒーの明度順を保つ。
+
+Icon ComposerのUIでDefault / Dark / Monoと32pt表示を確認する。`ictool`でDefault / Dark / Clear Light / Clear Dark / Tinted Light / Tinted Darkを出力し、`preview.html`で比較できる。
 
 ```sh
-# プロジェクトのルートから確認用PNGを再生成
+# Icon Composerの6 Appearanceを再生成
 mise exec -- bash artwork/icon/render.sh
 
 # アイコンを含むアプリをビルド
 mise exec -- scripts/build-app.sh
 ```
 
-ビルドは`.icon`を`actool`でmacOS 26.0向けにコンパイルし、ベクターレイヤーを含む`Assets.car`と`Dopa.icns`をアプリへ配置する。アプリのInfo.plistには`CFBundleIconName` / `CFBundleIconFile`を設定する。メニューバーの状態表示用SF Symbolsは別用途のため既存のまま。
+ビルドは`.icon`を`actool`でmacOS 26.0向けにコンパイルし、ベクターレイヤーを含む`Assets.car`と互換用`Dopa.icns`をアプリへ配置する。`.icns`を手作業で管理する必要はない。ビルドスクリプトが最終Info.plistへ`CFBundleIconName`と`CFBundleIconFile`を設定する。メニューバーの状態表示用SF Symbolsは別用途のため既存のまま。
 
 参考: [Apple Icon Composer](https://developer.apple.com/icon-composer/)、[Creating your app icon using Icon Composer](https://developer.apple.com/documentation/xcode/creating-your-app-icon-using-icon-composer)。

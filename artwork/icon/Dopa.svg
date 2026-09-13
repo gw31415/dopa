@@ -1,13 +1,41 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <title>Dopa — a light through the night</title>
-  <desc>Original vector artwork. Two foreground shapes; no raster images, filters, strokes, masks, or traced paths. System enclosure and glass materials are supplied by Icon Composer.</desc>
+  <title>Dopa — coffee for the moon</title>
+  <desc>SVG concept based on the supplied composition reference: a large crescent at lower left and a tilted ceramic cup at upper right. Coffee curves over the lip, falls downward, and drapes across the inner edge of the moon, with one rounded drop beside it. Separate editable background, moon, cup, and coffee groups. No embedded images or glass effects.</desc>
   <defs>
     <linearGradient id="background" x1="0" y1="0" x2="0" y2="1" gradientUnits="objectBoundingBox">
-      <stop stop-color="#4A51B7"/>
-      <stop offset="1" stop-color="#171D5E"/>
+      <stop stop-color="#4C4DB3"/>
+      <stop offset="1" stop-color="#171B53"/>
+    </linearGradient>
+    <linearGradient id="moon" x1="0" y1="0" x2="0.8" y2="1">
+      <stop stop-color="#E1F8FF"/>
+      <stop offset="1" stop-color="#8EBFFF"/>
+    </linearGradient>
+    <linearGradient id="ceramic" x1="0.2" y1="0" x2="0.8" y2="1">
+      <stop stop-color="#FFFAEF"/>
+      <stop offset="1" stop-color="#E8D7B9"/>
+    </linearGradient>
+    <linearGradient id="coffee" gradientUnits="userSpaceOnUse" x1="495" y1="335" x2="495" y2="710">
+      <stop stop-color="#70422D"/>
+      <stop offset="0.2" stop-color="#9C5E36"/>
+      <stop offset="1" stop-color="#844A2C"/>
     </linearGradient>
   </defs>
-  <g id="background-layer"><path fill="url(#background)" d="M0 0H1024V1024H0Z"/></g>
-  <g id="moon-layer"><path fill="#D5EEFF" d="M519 215C353 211 218 342 218 512C218 681 354 818 523 818C643 818 750 750 801 648C808 634 793 620 780 627C727 654 666 660 608 641C475 598 402 455 445 322C457 284 481 250 511 227C518 222 522 219 519 215Z"/></g>
-  <g id="light-layer"><circle cx="660" cy="365" r="137" fill="#FFBE61"/></g>
+  <g id="background-layer">
+    <path fill="url(#background)" d="M0 0H1024V1024H0Z"/>
+  </g>
+  <g id="moon-layer">
+    <path fill="url(#moon)" d="M439 239C293 252 180 382 179 528C175 715 323 866 516 867C659 868 781 769 816 631C821 612 809 602 795 613C705 682 619 693 531 653C403 596 334 499 351 376C359 316 395 279 440 247C449 240 446 237 439 239Z"/>
+  </g>
+  <g id="cup-layer">
+    <path id="cup-handle" fill="url(#ceramic)" d="M638 190C682 150 724 110 765 110C817 110 858 158 860 210C862 246 849 280 829 309C817 301 805 290 793 280C814 252 822 230 818 205C813 175 791 153 769 154C746 153 725 176 712 214C686 214 656 204 638 190Z"/>
+    <path id="cup-body" fill="url(#ceramic)" d="M631 181C633 168 636 158 639.63 154.09C650 154.09 671 160.2 680 152.62C718 177 779 247 815 282C855 310 850 343 832 383C811 431 775 478 735 503C710 520 688.84 515.41 663 510C620 501 544 456 478 409C502 368 557 273 631 181Z"/>
+    <g transform="translate(565 282) rotate(-56)">
+      <ellipse id="cup-rim" rx="151" ry="47" fill="#FFFAEF"/>
+    </g>
+    <path id="coffee-surface-shape" fill="url(#coffee)" d="M639.941 170.909A134 32 -56 1 0 490.059 393.091A134 32 -56 1 0 639.941 170.909Z"/>
+  </g>
+  <g id="coffee-flow-layer" fill="url(#coffee)">
+    <path id="coffee-stream" d="M548 330C522 339 486 359 465 390C448 418 455 451 457 480C460 521 408 569 422 582C436 595 451 607 468 618C474 622 478 626 480 633C486 678 470 758 479 793C486 822 510 833 529 810C548 783 541 680 528 618C518 594 508 558 499 538C490 509 490 483 492 457C494 416 504 390 528 370C540 360 549 351 557 342C563 336 556 327 548 330Z"/>
+    <path id="coffee-drop" d="M588 551C594 572 627 591 627 610C627 628 613 640 596 638C578 636 569 620 576 603C582 587 587 570 588 551Z"/>
+  </g>
 </svg>
