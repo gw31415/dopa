@@ -94,8 +94,6 @@ struct DopaPanel: View {
 @available(macOS 26.0, *)
 private struct GlassScopeBar: View {
   @Binding var selection: Int
-  @Namespace private var glassNamespace
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
     GlassEffectContainer {
@@ -124,12 +122,11 @@ private struct GlassScopeBar: View {
     }
     .buttonStyle(.plain)
     .glassEffect(selection == value ? .regular.interactive() : .identity, in: Capsule())
-    .glassEffectID(selection == value ? "selected-scope" : nil, in: glassNamespace)
     .accessibilityAddTraits(selection == value ? .isSelected : [])
   }
 
   private func select(_ value: Int) {
-    withAnimation(reduceMotion ? nil : .smooth) { selection = value }
+    selection = value
   }
 }
 

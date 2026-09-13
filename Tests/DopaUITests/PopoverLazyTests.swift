@@ -16,6 +16,7 @@ final class PopoverLazyTests: XCTestCase {
     let first = delegate.ensurePopover(for: model)
     XCTAssertTrue(delegate.hasPopover)
     XCTAssertTrue(first.behavior == .transient)
+    XCTAssertFalse(first.animates)
     XCTAssertTrue(first.delegate === delegate)
     XCTAssertNotNil(first.contentViewController)
     XCTAssertTrue(delegate.ensurePopover(for: model) === first)

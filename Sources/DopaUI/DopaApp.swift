@@ -200,7 +200,7 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
     if let popover { return popover }
     let popover = NSPopover()
     popover.behavior = .transient
-    popover.animates = true
+    popover.animates = false
     let contentController = PanelHostingController(rootView: DopaPanelHost(model: model, clearFocus: { [weak self] in self?.clearTimeFieldFocus() }))
     contentController.prepareSize()
 
