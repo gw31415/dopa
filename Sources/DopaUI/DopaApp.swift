@@ -51,11 +51,18 @@ struct DopaApp: App {
 @available(macOS 26.0, *)
 @MainActor
 final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
+  private enum DaemonManagementAction { case install, start }
+
   static var model: AppModel?
 
   private var statusItem: NSStatusItem?
   private var popover: NSPopover?
   private var popoverInitialFocusView: PopoverInitialFocusView?
+  private let daemonInstaller = DaemonInstaller()
+  private var daemonManagementPromptActive = false
+  private var daemonManagementTask: Task<Void, Never>?
+  private var connectedSinceLaunch = false
+  private var offeredStartupRecovery = false
   private lazy var quitMenu: NSMenu = {
     let menu = NSMenu()
     menu.autoenablesItems = false
@@ -72,6 +79,13 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
     guard let model = Self.model else { return }
     installStatusItem(for: model)
     observeStatus(of: model)
+    connectedSinceLaunch = model.connectionState == .connected
+    if daemonUIState == .notInstalled {
+      offeredStartupRecovery = true
+      _ = offerDaemonManagement(.install)
+    } else {
+      offerStartupRecoveryIfNeeded(for: model)
+    }
   }
 
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -122,11 +136,22 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
 
   private func updateStatusItem() {
     guard let button = statusItem?.button, let model = Self.model else { return }
+    let state = daemonUIState
+    let status = state.status ?? model.status
     button.title = ""
-    button.image = NSImage(systemSymbolName: model.statusSymbol, accessibilityDescription: model.status)
+    button.image = NSImage(systemSymbolName: state.symbol, accessibilityDescription: status)
     button.image?.isTemplate = true
-    button.toolTip = "Dopa — \(model.status)"
-    button.setAccessibilityLabel("Dopa — \(model.status)")
+    button.toolTip = "Dopa — \(status)"
+    button.setAccessibilityLabel("Dopa — \(status)")
+  }
+
+  private var daemonUIState: DaemonUIState {
+    guard let model = Self.model else { return .checking }
+    return .resolve(
+      isInstalled: daemonInstaller.isInstalled,
+      connectionState: model.connectionState,
+      isConfirmed: model.snapshot?.isConfirmed == true,
+      hasSessions: !model.sessions.isEmpty)
   }
 
   private func observeStatus(of model: AppModel) {
@@ -136,13 +161,21 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
     } onChange: { [weak self] in
       Task { @MainActor [weak self] in
         guard let self, let model = Self.model else { return }
+        if model.connectionState == .connected { self.connectedSinceLaunch = true }
         self.updateStatusItem()
+        self.offerStartupRecoveryIfNeeded(for: model)
         self.observeStatus(of: model)
       }
     }
   }
 
   @objc private func statusItemAction(_ sender: NSStatusBarButton) {
+    if let action = daemonManagementActionFromStatusItem {
+      popover?.performClose(nil)
+      _ = offerDaemonManagement(action)
+      return
+    }
+
     if NSApp.currentEvent?.type == .rightMouseUp {
       popover?.performClose(nil)
       if let event = NSApp.currentEvent {
@@ -174,6 +207,93 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
         }
       }
     }
+  }
+
+  private var daemonManagementActionFromStatusItem: DaemonManagementAction? {
+    #if DOPA_UI_TESTING
+    nil
+    #else
+    switch daemonUIState.clickAction {
+    case .install: .install
+    case .start: .start
+    case .normal: nil
+    }
+    #endif
+  }
+
+  @discardableResult
+  private func offerDaemonManagement(_ action: DaemonManagementAction) -> Bool {
+    #if DOPA_UI_TESTING
+    return false
+    #else
+    switch action {
+    case .install:
+      guard daemonUIState == .notInstalled else { return false }
+    case .start:
+      guard daemonUIState == .stopped else { return false }
+    }
+    guard !daemonManagementPromptActive else { return true }
+
+    daemonManagementPromptActive = true
+    NSApp.activate(ignoringOtherApps: true)
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    switch action {
+    case .install:
+      alert.messageText = "dopa-daemonがインストールされていません"
+      alert.informativeText = "Dopaを使用するにはdopa-daemonのインストールが必要です。続けるを選ぶと、管理者認証を求めます。"
+    case .start:
+      alert.messageText = "dopa-daemonが停止しています"
+      alert.informativeText = "Dopaを使用するにはdopa-daemonを起動してください。続けるを選ぶと、管理者認証を求めます。"
+    }
+    alert.addButton(withTitle: "続ける")
+    alert.addButton(withTitle: "キャンセル")
+    guard alert.runModal() == .alertFirstButtonReturn else {
+      daemonManagementPromptActive = false
+      return true
+    }
+
+    daemonManagementTask = Task { [weak self] in
+      guard let self else { return }
+      do {
+        switch action {
+        case .install: try await daemonInstaller.install()
+        case .start: try await daemonInstaller.manage(.start)
+        }
+      } catch {
+        showDaemonManagementError(error, action: action)
+      }
+      daemonManagementPromptActive = false
+      daemonManagementTask = nil
+      updateStatusItem()
+    }
+    return true
+    #endif
+  }
+
+  private func offerStartupRecoveryIfNeeded(for model: AppModel) {
+    guard !offeredStartupRecovery, !connectedSinceLaunch,
+      model.connectionState == .disconnected else { return }
+    offeredStartupRecovery = true
+    switch daemonUIState {
+    case .notInstalled: _ = offerDaemonManagement(.install)
+    case .stopped: _ = offerDaemonManagement(.start)
+    default: break
+    }
+  }
+
+  private func showDaemonManagementError(
+    _ error: Error, action: DaemonManagementAction
+  ) {
+    NSApp.activate(ignoringOtherApps: true)
+    let alert = NSAlert()
+    alert.alertStyle = .critical
+    switch action {
+    case .install: alert.messageText = "dopa-daemonをインストールできませんでした"
+    case .start: alert.messageText = "dopa-daemonを起動できませんでした"
+    }
+    alert.informativeText = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
+    alert.runModal()
   }
 
   func popoverWillShow(_ notification: Notification) {

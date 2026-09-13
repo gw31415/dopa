@@ -67,7 +67,7 @@ public final class AppModel {
   }
   public var statusSymbol: String {
     guard connectionState == .connected, snapshot?.isConfirmed == true else { return "exclamationmark.triangle" }
-    return sessions.isEmpty ? "moon" : "cup.and.saucer.fill"
+    return sessions.isEmpty ? "moon.fill" : "cup.and.saucer.fill"
   }
 
   public func startMonitoring() {

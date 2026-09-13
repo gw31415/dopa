@@ -390,6 +390,46 @@ public final class DaemonManager: @unchecked Sendable {
     }
   }
 
+  /// Starts an already-installed daemon through launchd.
+  ///
+  /// The managed files are checked while holding the same lock used by
+  /// install/uninstall. A successful launchd operation is not enough to call
+  /// this command successful: the daemon must answer a status request and
+  /// report a healthy idle or active phase.
+  public func start() throws {
+    try checkRoot()
+    let lock = try acquireManagementLock()
+    defer { close(lock) }
+    _ = try validateExistingInstallation()
+    try startExistingService()
+    try waitUntilReady()
+  }
+
+  /// Stops an already-installed daemon after it has confirmed session
+  /// cleanup and restoration. If the service is currently not reachable,
+  /// prepareAndBootoutExistingService starts that exact installation once so
+  /// the daemon can recover its journal before it is booted out.
+  public func stop() throws {
+    try checkRoot()
+    let lock = try acquireManagementLock()
+    defer { close(lock) }
+    _ = try validateExistingInstallation()
+    try prepareAndBootoutExistingService()
+  }
+
+  /// Performs a safe stop followed by a fresh launchd bootstrap and readiness
+  /// check, under one management lock so another lifecycle command cannot
+  /// interleave between the two phases.
+  public func restart() throws {
+    try checkRoot()
+    let lock = try acquireManagementLock()
+    defer { close(lock) }
+    _ = try validateExistingInstallation()
+    try prepareAndBootoutExistingService()
+    try bootstrap()
+    try waitUntilReady()
+  }
+
   private func checkRoot() throws {
     guard !requireRoot || geteuid() == 0 else {
       throw DaemonManagementError.permissionDenied("root is required; run with sudo")
@@ -462,6 +502,36 @@ public final class DaemonManager: @unchecked Sendable {
     }
     guard let data = config.data else { return nil }
     return try DaemonConfiguration(data: data)
+  }
+
+  private func validateExistingInstallation() throws -> [FileSnapshot] {
+    let existing = try snapshotManagedFiles()
+    guard existing.allSatisfy(\.exists) else {
+      if existing.contains(where: { $0.exists }) {
+        throw DaemonManagementError.invalidConfiguration(
+          "daemon installation is incomplete; run dopa-daemon install")
+      }
+      throw DaemonManagementError.invalidConfiguration(
+        "dopa-daemon is not installed; run dopa-daemon install")
+    }
+
+    let expectedModes: [String: mode_t] = [
+      layout.executablePath: 0o755,
+      layout.plistPath: 0o644,
+      layout.configPath: 0o600,
+    ]
+    for snapshot in existing {
+      guard let expectedMode = expectedModes[snapshot.path], snapshot.mode == expectedMode else {
+        throw DaemonManagementError.unsafePath(
+          "managed file has unsafe mode: \(snapshot.path)")
+      }
+    }
+    _ = try DaemonConfiguration.loadSecure(
+      from: layout.configPath,
+      ownerUID: layout.expectedOwnerUID,
+      groupGID: layout.expectedGroupGID,
+      mode: 0o600)
+    return existing
   }
 
   private func snapshotManagedFiles() throws -> [FileSnapshot] {
@@ -778,7 +848,7 @@ public final class DaemonManager: @unchecked Sendable {
       // A previous installation may have a valid plist but no live daemon
       // (for example after a crash). Start that exact installation first so
       // its journal can perform the required orderly shutdown.
-      guard shutdownRequester == nil, case .serviceUnavailable = error else { throw error }
+      guard case .serviceUnavailable = error else { throw error }
       try startExistingService()
       try requestShutdown()
     } catch {

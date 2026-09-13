@@ -25,7 +25,7 @@ launchd ── 起動・再起動 ────────┤
 
 | 成果物・モジュール | 責務 |
 | --- | --- |
-| `dopa-daemon` | `install` / `uninstall` / `run` / `status`。管理・状態確認コマンドとサービスの入口 |
+| `dopa-daemon` | `install` / `uninstall` / `start` / `stop` / `restart` / `run` / `status`。管理・状態確認コマンドとサービスの入口 |
 | `dopa` | セッション開始、シグナルによる解除 |
 | `Dopa.app` / `DopaUI` | メインウィンドウを持たないSwiftUIメニューバーパネル |
 | `DopaUIModel` | 時間設定とdraft、接続所有権、期限、確認状態。ソケットは専用直列queueへ分離 |
@@ -35,7 +35,7 @@ launchd ── 起動・再起動 ────────┤
 | `DopaCore` | `DaemonService` による認証、セッション集約、状態通知、電源操作、既存ジャーナルの再利用 |
 | `CDopa` | 必要な POSIX / IOKit SPI の C ブリッジ。クライアントから電源操作を参照しない |
 
-デーモンと CLI は個別に配布・更新できる。ビルドと検証の入口は `Makefile` に集約する。UIバンドルは `make app` から `scripts/build-app.sh` を呼び出して生成し、`Contents/MacOS/dopa-ui` と、`Contents/Helpers/dopa`・`Contents/Helpers/dopa-daemon` を同梱する。補助実行ファイルを個別に署名してからAppを署名し、各実行権・署名・補助コマンドのヘルプ起動を検証する。UIはサービス導入や更新を自動実行しない。プロトコルの仕様と適合テストは言語非依存にし、Swift ライブラリの利用を外部クライアントに強制しない。
+デーモンと CLI は個別に配布・更新できる。ビルドと検証の入口は `Makefile` に集約する。Swift を含むツールのバージョンと Swift が参照する Xcode SDK は `mise.toml` に集約し、すべて `mise exec --` から実行する。UIバンドルは `make app` から `scripts/build-app.sh` を呼び出して生成し、`dopa-ui` のリンク SDK が macOS 26 以降であることを検証した上で、`Contents/MacOS/dopa-ui` と、`Contents/Helpers/dopa`・`Contents/Helpers/dopa-daemon` を同梱する。補助実行ファイルを個別に署名してからAppを署名し、各実行権・署名・補助コマンドのヘルプ起動を検証する。UIは起動時にサービスが未導入なら導入確認を、導入済みだが初回接続できなければ起動確認を表示し、利用者が「続ける」を選んだ場合に限り管理者認証を要求する。起動中の切断後は自動表示せず、未導入ならアウトライン月、導入済み停止中なら注意アイコンを表示し、そのクリックを通常メニューより優先して対応する確認を表示する。正常なアイドル状態は塗りつぶし月で表す。プロトコルの仕様と適合テストは言語非依存にし、Swift ライブラリの利用を外部クライアントに強制しない。
 
 ## コマンド
 
@@ -58,17 +58,22 @@ dopa-daemon status --json
 # 復元・サービス登録解除・配置ファイル削除
 sudo dopa-daemon uninstall
 
+# 導入済みサービスの安全な起動・停止・再起動
+sudo dopa-daemon start
+sudo dopa-daemon stop
+sudo dopa-daemon restart
+
 # launchd 用。フォアグラウンドでサービスを実行
 dopa-daemon run
 ```
 
 - `-d / --keep-display-on`、`-l / --stop-on-lid-close` の意味と既定値 false を維持する。
-- `run` / `install` / `uninstall` は root 必須。`status` と `--help` は sudo 不要。権限の確認はサブコマンドごとに行う。
+- `run` / `install` / `uninstall` / `start` / `stop` / `restart` は root 必須。`status` と `--help` は sudo 不要。権限の確認はサブコマンドごとに行う。
 - `dopa` は自動 sudo、自動インストール、デーモンの子プロセス起動を行わない。未導入時は導入コマンドを案内する。
 - `dopa-daemon status` はデーモン状態、設定の最終確認値、セッション一覧、障害を表示する。`--json` は公開 API の snapshot オブジェクトを 1 行で出す。一般ユーザーのクライアントとして公開 API の hello / status.get を利用し、電源操作・状態ファイルの直接読み取り・サービス起動は行わない。デーモン不在時も別インスタンスを起動せず接続不能を報告する。`dopa status` の別名は設けない。
 - 終了コードは 0 が正常（明示解除・閉蓋による終了を含む）、1 が接続・操作・復元などの失敗、2 が CLI 構文エラー。`status` は接続不能または degraded なら 1。
 - SIGINT / SIGTERM / SIGHUP / SIGQUIT は release を要求し、完了を待って終了する。確認できない場合は成功扱いにしない。待機上限は 10 秒で、期限到達時は状態未確認として 1 で終了する。切断による解除はデーモンが続行する。
-- `start` / `stop` / `restart` の独自管理コマンドは設けない。サービスの管理は launchctl、導入と削除は管理コマンドが担当する。
+- `start` は導入済み管理ファイルを検証してlaunchdサービスを起動し、正常応答まで確認する。`stop` は全セッションと電源設定の復元をdaemonから確認してからbootoutする。停止済みでもjournal復旧が必要な場合は一度起動して復元を完了する。`restart` は同じ管理lock内で安全な停止・起動・正常応答確認を行う。
 
 ## launchd と配置
 

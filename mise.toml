@@ -2,3 +2,9 @@
 swift = "6.3.3"
 node = "26.8.1"
 python = "3.14.7"
+
+[env]
+# The downloadable Swift toolchain otherwise falls back to its bundled macOS
+# 13 SDK. Keep every mise entry point on the active Xcode macOS 26 SDK so the
+# SwiftUI executable is linked with the Liquid Glass-capable SDK.
+SDKROOT = "{{ exec(command='xcrun --sdk macosx --show-sdk-path') }}"

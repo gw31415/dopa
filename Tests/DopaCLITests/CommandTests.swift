@@ -30,6 +30,9 @@ final class CommandTests: XCTestCase {
     XCTAssertEqual(daemon.0, 0)
     XCTAssertTrue(daemon.1.contains("status"))
     XCTAssertTrue(daemon.1.contains("install"))
+    XCTAssertTrue(daemon.1.contains("start"))
+    XCTAssertTrue(daemon.1.contains("stop"))
+    XCTAssertTrue(daemon.1.contains("restart"))
   }
 
   func testStatusBelongsToDaemonAndInvalidSyntaxUsesExitTwo() throws {
@@ -38,6 +41,9 @@ final class CommandTests: XCTestCase {
       ("dopa-daemon", ["status", "--unknown"]),
       ("dopa-daemon", ["install", "--user"]),
       ("dopa-daemon", ["uninstall", "unexpected"]),
+      ("dopa-daemon", ["start", "unexpected"]),
+      ("dopa-daemon", ["stop", "unexpected"]),
+      ("dopa-daemon", ["restart", "unexpected"]),
     ] {
       let result = try run(executable, args)
       XCTAssertEqual(result.0, 2, "\(executable) \(args): \(result.2)")
@@ -46,7 +52,7 @@ final class CommandTests: XCTestCase {
 
   func testManagementAndRunRequireRootRatherThanSilentlyShowingHelp() throws {
     guard geteuid() != 0 else { throw XCTSkip("must not invoke privileged commands as root in tests") }
-    for command in ["install", "uninstall", "run"] {
+    for command in ["install", "uninstall", "start", "stop", "restart", "run"] {
       let result = try run("dopa-daemon", [command])
       XCTAssertEqual(result.0, 1, command)
       XCTAssertTrue(result.2.contains("root"), "\(command): \(result.2)")

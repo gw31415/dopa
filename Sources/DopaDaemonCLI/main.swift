@@ -9,6 +9,9 @@ private enum DaemonCommand {
   case help
   case install(user: String?)
   case uninstall
+  case start
+  case stop
+  case restart
   case status(json: Bool)
   case run
 }
@@ -29,18 +32,24 @@ private let daemonHelp = """
   Usage:
     sudo dopa-daemon install [--user NAME|UID]
     sudo dopa-daemon uninstall
+    sudo dopa-daemon start
+    sudo dopa-daemon stop
+    sudo dopa-daemon restart
     dopa-daemon status [--json]
     sudo dopa-daemon run
 
   Commands:
     install       Install or update the launchd-managed daemon.
     uninstall     Stop the daemon and remove its managed files.
+    start         Start an installed daemon and wait until it is ready.
+    stop          Restore active sessions and stop the daemon safely.
+    restart       Safely stop, start, and verify the daemon.
     status        Show the daemon snapshot; --json emits one JSON object.
     run           Run the foreground launchd service.
 
   install preserves the configured user during updates. Use uninstall followed
   by install --user to change it. Updating or uninstalling ends active sessions.
-  install, uninstall, and run require root.
+  install, uninstall, start, stop, restart, and run require root.
   """
 
 private func parse(_ args: [String]) throws -> DaemonCommand {
@@ -76,6 +85,21 @@ private func parse(_ args: [String]) throws -> DaemonCommand {
     if args.count == 1 { return .uninstall }
     if args.dropFirst().allSatisfy({ $0 == "--help" || $0 == "-h" }) { return .help }
     throw DaemonCLIError("uninstall does not accept arguments")
+
+  case "start":
+    if args.count == 1 { return .start }
+    if args.dropFirst().allSatisfy({ $0 == "--help" || $0 == "-h" }) { return .help }
+    throw DaemonCLIError("start does not accept arguments")
+
+  case "stop":
+    if args.count == 1 { return .stop }
+    if args.dropFirst().allSatisfy({ $0 == "--help" || $0 == "-h" }) { return .help }
+    throw DaemonCLIError("stop does not accept arguments")
+
+  case "restart":
+    if args.count == 1 { return .restart }
+    if args.dropFirst().allSatisfy({ $0 == "--help" || $0 == "-h" }) { return .help }
+    throw DaemonCLIError("restart does not accept arguments")
 
   case "status":
     var json = false
@@ -171,6 +195,33 @@ private func run() throws {
       throw DaemonCLIError("uninstall failed: \(error)", status: 1)
     }
     print("dopa-daemon uninstalled")
+
+  case .start:
+    try requireRoot(for: "start")
+    do {
+      try DaemonManager().start()
+    } catch {
+      throw DaemonCLIError("start failed: \(error)", status: 1)
+    }
+    print("dopa-daemon started and ready")
+
+  case .stop:
+    try requireRoot(for: "stop")
+    do {
+      try DaemonManager().stop()
+    } catch {
+      throw DaemonCLIError("stop failed: \(error)", status: 1)
+    }
+    print("dopa-daemon stopped")
+
+  case .restart:
+    try requireRoot(for: "restart")
+    do {
+      try DaemonManager().restart()
+    } catch {
+      throw DaemonCLIError("restart failed: \(error)", status: 1)
+    }
+    print("dopa-daemon restarted and ready")
 
   case .status(let json):
     try runStatus(json: json)

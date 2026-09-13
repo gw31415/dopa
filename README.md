@@ -6,13 +6,13 @@ macOS のシステムスリープと閉蓋スリープを抑制するCLIとメ�
 
 ## ビルドと導入
 
-macOS 13 以上が対象です。セットアップには mise が必要です。開発ツールは `mise.toml` で Swift 6.3.3、Node.js 26.8.1、Python 3.14.7 を固定し、`mise.lock` に配布物の取得先とチェックサムを記録しています。外部パッケージへの依存はありません。
+macOS 13 以上が対象です。セットアップには mise が必要です。開発ツールは `mise.toml` で Swift 6.3.3、Node.js 26.8.1、Python 3.14.7 を固定し、Swift には使用中の Xcode が持つ macOS SDK を `SDKROOT` として渡します。`mise.lock` には配布物の取得先とチェックサムを記録しています。外部パッケージへの依存はありません。
 
 ```sh
 mise install --locked
 ```
 
-CLI・デーモンのビルドには Xcode または Command Line Tools も必要です。App バンドルの生成には macOS 26 SDK を含む Xcode と、そこに含まれる `actool`・`codesign`・`plutil` を使います。これら Apple のツールは mise の管理対象外です。
+CLI・デーモンのビルドには Xcode または Command Line Tools も必要です。App バンドルの生成には macOS 26 SDK を含む Xcode と、そこに含まれる SDK・`actool`・`codesign`・`plutil` を使います。SDK の選択も `mise.toml` に集約しており、`mise exec --` から外れてビルドしません。
 
 ```sh
 make build
@@ -53,7 +53,7 @@ make app
 open .build/Dopa.app
 ```
 
-ビルドスクリプトは `dopa-ui`・`dopa`・`dopa-daemon` のreleaseビルドを作り、`Resources/Dopa.icon` を `actool` で macOS 26向けにコンパイルして `Dopa.app/Contents/Resources/Assets.car` と `Dopa.app/Contents/Resources/Dopa.icns` を生成します。UIを `Dopa.app/Contents/MacOS/dopa-ui`、CLIとデーモンを `Dopa.app/Contents/Helpers/` に同梱します。各実行ファイルの権限・署名と、同梱CLI・デーモンのヘルプ起動を確認します。同梱だけではサービスの導入・更新は行いません。Appに含まれるデーモンを導入する場合は次を実行します。
+ビルドスクリプトは `dopa-ui`・`dopa`・`dopa-daemon` のreleaseビルドを作り、`dopa-ui` が macOS 26 以降の SDK でリンクされていることも検証します。`Resources/Dopa.icon` を `actool` で macOS 26向けにコンパイルして `Dopa.app/Contents/Resources/Assets.car` と `Dopa.app/Contents/Resources/Dopa.icns` を生成し、UIを `Dopa.app/Contents/MacOS/dopa-ui`、CLIとデーモンを `Dopa.app/Contents/Helpers/` に同梱します。各実行ファイルの権限・署名と、同梱CLI・デーモンのヘルプ起動を確認します。同梱だけではサービスの導入・更新は行いません。Appに含まれるデーモンを導入する場合は次を実行します。
 
 ```sh
 sudo .build/Dopa.app/Contents/Helpers/dopa-daemon install
@@ -63,7 +63,7 @@ CLIは `.build/Dopa.app/Contents/Helpers/dopa` から直接使うか、PATH上�
 
 `Dopa.app` はメニューバーに常駐し、メインウィンドウを持ちません。アイコンの通常クリックで操作パネルを開き、右クリックメニューからアプリを終了します。起動だけでは抑制を開始せず、パネルを閉じた後も実行中の期限を管理します。「このアプリ」で時間・終了時刻・無制限と動作設定を操作し、「全体管理」で各使用元の状態を確認できます。
 
-同じユーザーの使用元は確認後、管理者認証なしで停止できます（デーモンの `session.stopSessions` capabilityが必要）。別ユーザーの対象や旧デーモンの管理停止では、従来の `admin.stopSessions` とmacOS標準の管理者認証を使います。全体管理の各行に「消灯抑制」「閉じたら停止」の設定を表示し、いずれかの使用元によるディスプレイ消灯抑制が確認されている間はヘッダーに「消灯抑制」を表示します。更新する場合は新しいAppの同梱デーモン、または個別にビルドした `dopa-daemon` から `install` を再実行してください。更新時には進行中のセッションが終了します。UI自身はサービスを自動導入・更新しません。
+同じユーザーの使用元は確認後、管理者認証なしで停止できます（デーモンの `session.stopSessions` capabilityが必要）。別ユーザーの対象や旧デーモンの管理停止では、従来の `admin.stopSessions` とmacOS標準の管理者認証を使います。全体管理の各行に「消灯抑制」「閉じたら停止」の設定を表示し、いずれかの使用元によるディスプレイ消灯抑制が確認されている間はヘッダーに「消灯抑制」を表示します。サービス未導入はアウトライン月、導入済みで停止中は注意アイコン、正常なアイドル状態は塗りつぶし月で表示します。起動時と各状態アイコンのクリック時に導入または起動の確認を出し、「続ける」が選ばれた場合に限って管理者認証を要求します。更新する場合は新しいAppの同梱デーモン、または個別にビルドした `dopa-daemon` から `install` を再実行してください。更新時には進行中のセッションが終了します。
 
 バンドルはローカル実行用のad-hoc署名です。一般配布には別途Developer ID署名とnotarizationが必要です。ログイン時の自動起動登録は行いません。
 
@@ -76,13 +76,18 @@ CLIは `.build/Dopa.app/Contents/Helpers/dopa` から直接使うか、PATH上�
 
 # 全セッションを終了・復元してサービスを削除
 sudo .build/release/dopa-daemon uninstall
+
+# 導入済みサービスの起動・安全な停止・再起動
+sudo .build/release/dopa-daemon start
+sudo .build/release/dopa-daemon stop
+sudo .build/release/dopa-daemon restart
 ```
 
 `status` は公開 API からデーモンの状態、セッション一覧、設定の確認値、障害を取得します。デーモンが不在でも自動起動・sudo は行いません。`dopa status` はありません。
 
 `install` の再実行はデーモンの更新です。更新・削除では進行中の全セッションを終了します。設定の復元を確認してからサービスの登録解除とファイル操作へ進み、失敗した場合は復旧に必要なファイルを保持します。削除は `dopa` CLI 自体には影響しません。
 
-`dopa-daemon run` は launchd 用の root 必須の入口です。フォアグラウンドで動作し、自分自身をバックグラウンド化しません。独自の start/stop/restart はなく、サービスのライフサイクルは launchd が管理します。OS 再起動後もサービスを起動します。
+`start` は導入済みサービスを起動して正常応答まで待ちます。`stop` は進行中のセッションを終了し、電源設定の復元を確認してからサービスを停止します。`restart` はこの安全な停止と起動を一続きで行います。いずれもroot権限が必要です。`dopa-daemon run` はlaunchd用のroot必須の入口で、フォアグラウンド動作し、自分自身をバックグラウンド化しません。OS再起動後もサービスを起動します。
 
 | パス | 用途 |
 | --- | --- |

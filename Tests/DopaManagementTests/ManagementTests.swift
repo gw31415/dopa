@@ -294,6 +294,147 @@ final class ManagementTests: XCTestCase {
     XCTAssertEqual(shutdowns.value, 0)
   }
 
+  func testStartBootstrapsInstalledServiceAndWaitsUntilReady() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let runner = FakeRunner()
+    var readinessChecks = 0
+    let installer = manager(
+      fixture,
+      runner: runner,
+      readiness: { _ in
+        readinessChecks += 1
+        return true
+      })
+    try installer.install(executableURL: fixture.source, user: String(geteuid()))
+    runner.calls.removeAll()
+    readinessChecks = 0
+
+    try installer.start()
+
+    XCTAssertEqual(
+      runner.calls.map(\.arguments),
+      [["bootstrap", "system", fixture.layout.plistPath]])
+    XCTAssertEqual(readinessChecks, 1)
+  }
+
+  func testStopConfirmsShutdownBeforeBootout() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let runner = FakeRunner()
+    let shutdowns = Counter()
+    let installer = manager(fixture, runner: runner, shutdownCount: shutdowns)
+    try installer.install(executableURL: fixture.source, user: String(geteuid()))
+    runner.calls.removeAll()
+
+    try installer.stop()
+
+    XCTAssertEqual(shutdowns.value, 1)
+    XCTAssertEqual(
+      runner.calls.map(\.arguments),
+      [["bootout", fixture.layout.serviceTarget]])
+  }
+
+  func testStopStartsDisconnectedInstalledServiceForJournalRecovery() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let runner = FakeRunner()
+    let shutdowns = Counter()
+    var firstShutdown = true
+    let installer = DaemonManager(
+      layout: fixture.layout,
+      commandRunner: runner,
+      shutdownRequester: { _ in
+        shutdowns.value += 1
+        if firstShutdown {
+          firstShutdown = false
+          throw DaemonManagementError.serviceUnavailable("daemon is not connected")
+        }
+      },
+      readinessChecker: { _ in true },
+      requireRoot: false)
+    try installer.install(executableURL: fixture.source, user: String(geteuid()))
+    runner.calls.removeAll()
+    runner.results = [
+      CommandResult(status: 17, stderr: "service already bootstrapped"),
+      CommandResult(status: 0),
+      CommandResult(status: 0),
+    ]
+
+    try installer.stop()
+
+    XCTAssertEqual(shutdowns.value, 2)
+    XCTAssertEqual(
+      runner.calls.map(\.arguments),
+      [
+        ["bootstrap", "system", fixture.layout.plistPath],
+        ["kickstart", fixture.layout.serviceTarget],
+        ["bootout", fixture.layout.serviceTarget],
+      ])
+  }
+
+  func testRestartSafelyStopsThenBootstrapsAndWaitsUntilReady() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let runner = FakeRunner()
+    let shutdowns = Counter()
+    var readinessChecks = 0
+    let installer = DaemonManager(
+      layout: fixture.layout,
+      commandRunner: runner,
+      shutdownRequester: { _ in shutdowns.value += 1 },
+      readinessChecker: { _ in
+        readinessChecks += 1
+        return true
+      },
+      requireRoot: false)
+    try installer.install(executableURL: fixture.source, user: String(geteuid()))
+    runner.calls.removeAll()
+    readinessChecks = 0
+
+    try installer.restart()
+
+    XCTAssertEqual(shutdowns.value, 1)
+    XCTAssertEqual(
+      runner.calls.map(\.arguments),
+      [
+        ["bootout", fixture.layout.serviceTarget],
+        ["bootstrap", "system", fixture.layout.plistPath],
+      ])
+    XCTAssertEqual(readinessChecks, 1)
+  }
+
+  func testLifecycleCommandsRejectMissingOrUnsafeInstallations() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let runner = FakeRunner()
+    let manager = manager(fixture, runner: runner)
+
+    for operation in [
+      { try manager.start() },
+      { try manager.stop() },
+      { try manager.restart() },
+    ] {
+      XCTAssertThrowsError(try operation()) { error in
+        guard case .invalidConfiguration(let message) = (error as? DaemonManagementError) else {
+          return XCTFail("expected missing-installation error, got \(error)")
+        }
+        XCTAssertTrue(message.contains("not installed"))
+      }
+    }
+    XCTAssertTrue(runner.calls.isEmpty)
+
+    try manager.install(executableURL: fixture.source, user: String(geteuid()))
+    XCTAssertEqual(chmod(fixture.layout.executablePath, 0o744), 0)
+    runner.calls.removeAll()
+    XCTAssertThrowsError(try manager.start()) { error in
+      guard case .unsafePath = (error as? DaemonManagementError) else {
+        return XCTFail("expected unsafe-installation error, got \(error)")
+      }
+    }
+    XCTAssertTrue(runner.calls.isEmpty)
+  }
+
   func testStatusFormatterIncludesSessionIdentityAndOptions() throws {
     let snapshot: JSONValue = .object([
       "phase": .string("active"),

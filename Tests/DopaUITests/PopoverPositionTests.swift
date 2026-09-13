@@ -58,7 +58,7 @@ final class PopoverPositionTests: XCTestCase {
         XCTAssertEqual(popover.contentSize, size)
       }
       await model.stop()
-      XCTAssertEqual(model.statusSymbol, "moon")
+      XCTAssertEqual(model.statusSymbol, "moon.fill")
       updateImage()
       for _ in 0..<5 {
         try await Task.sleep(for: .milliseconds(30))

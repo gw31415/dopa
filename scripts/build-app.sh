@@ -42,6 +42,11 @@ esac
 
 ACTOOL_BIN="$(xcrun --sdk macosx --find actool 2>/dev/null || true)"
 [[ -n "${ACTOOL_BIN}" ]] || die "actool is required to compile ${ICON_SOURCE}"
+XCODE_SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version 2>/dev/null || true)"
+XCODE_SDK_MAJOR="${XCODE_SDK_VERSION%%.*}"
+[[ "${XCODE_SDK_MAJOR}" =~ ^[0-9]+$ ]] || die "could not read the active Xcode macOS SDK version"
+(( XCODE_SDK_MAJOR >= 26 )) \
+  || die "macOS SDK ${XCODE_SDK_VERSION} is too old; SDK 26 or newer is required"
 
 if [[ -x /opt/homebrew/bin/mise ]]; then
   MISE_BIN=/opt/homebrew/bin/mise
@@ -53,16 +58,19 @@ fi
 swift_build_args=(build --configuration release -Xswiftc -warnings-as-errors)
 products=(dopa-ui)
 if (( fixture )); then
-  SCRATCH_PATH="${BUILD_ROOT}/ui-fixture"
-  swift_build_args+=(--scratch-path "${SCRATCH_PATH}" -Xswiftc -DDOPA_UI_TESTING)
+  SCRATCH_PATH="${BUILD_ROOT}/ui-fixture-macos-sdk-${XCODE_SDK_VERSION}"
+  swift_build_args+=(-Xswiftc -DDOPA_UI_TESTING)
   APP_NAME=Dopa-Test.app
   BUNDLE_IDENTIFIER=dev.amas.dopa.test
+  BUNDLE_DISPLAY_NAME="Dopa (UI test)"
 else
-  SCRATCH_PATH="${BUILD_ROOT}"
+  SCRATCH_PATH="${BUILD_ROOT}/release-macos-sdk-${XCODE_SDK_VERSION}"
   APP_NAME=Dopa.app
   BUNDLE_IDENTIFIER=dev.amas.dopa
+  BUNDLE_DISPLAY_NAME=Dopa
   products+=(dopa dopa-daemon)
 fi
+swift_build_args+=(--scratch-path "${SCRATCH_PATH}")
 
 printf 'Building %s…\n' "${APP_NAME}"
 for product in "${products[@]}"; do
@@ -73,6 +81,15 @@ BIN_DIR="$(cd "${ROOT_DIR}" && "${MISE_BIN}" exec -- swift "${swift_build_args[@
 for product in "${products[@]}"; do
   [[ -x "${BIN_DIR}/${product}" ]] || die "SwiftPM did not produce ${BIN_DIR}/${product}"
 done
+
+VTOOL_BIN="$(xcrun --find vtool 2>/dev/null || true)"
+[[ -n "${VTOOL_BIN}" ]] || die "vtool is required to verify the dopa-ui SDK"
+UI_SDK_VERSION="$("${VTOOL_BIN}" -show-build "${BIN_DIR}/dopa-ui" | awk '$1 == "sdk" { print $2; exit }')"
+UI_SDK_MAJOR="${UI_SDK_VERSION%%.*}"
+[[ "${UI_SDK_MAJOR}" =~ ^[0-9]+$ ]] || die "could not read dopa-ui SDK version"
+(( UI_SDK_MAJOR >= 26 )) \
+  || die "dopa-ui was built with macOS SDK ${UI_SDK_VERSION}; mise must select macOS SDK 26 or newer"
+printf 'Verified dopa-ui macOS SDK %s\n' "${UI_SDK_VERSION}"
 
 APP_PATH="${BUILD_ROOT}/${APP_NAME}"
 CONTENTS_PATH="${APP_PATH}/Contents"
@@ -95,7 +112,7 @@ cp "${INFO_PLIST_SOURCE}" "${INFO_PLIST_PATH}"
 
 if (( fixture )); then
   plutil -replace CFBundleIdentifier -string "${BUNDLE_IDENTIFIER}" "${INFO_PLIST_PATH}"
-  plutil -replace CFBundleDisplayName -string "Dopa (UI test)" "${INFO_PLIST_PATH}"
+  plutil -replace CFBundleDisplayName -string "${BUNDLE_DISPLAY_NAME}" "${INFO_PLIST_PATH}"
 fi
 
 ICON_NAME="${ICON_SOURCE##*/}"
@@ -129,8 +146,8 @@ fi
 rm -f "${ICON_PARTIAL_INFO}"
 
 plutil -lint "${INFO_PLIST_PATH}" >/dev/null
-[[ "$(plutil -extract CFBundleDisplayName raw -o - "${INFO_PLIST_PATH}")" == Dopa ]] \
-  || die "CFBundleDisplayName must be Dopa"
+[[ "$(plutil -extract CFBundleDisplayName raw -o - "${INFO_PLIST_PATH}")" == "${BUNDLE_DISPLAY_NAME}" ]] \
+  || die "CFBundleDisplayName must be ${BUNDLE_DISPLAY_NAME}"
 [[ "$(plutil -extract CFBundleName raw -o - "${INFO_PLIST_PATH}")" == Dopa ]] \
   || die "CFBundleName must be Dopa"
 [[ "$(plutil -extract CFBundleExecutable raw -o - "${INFO_PLIST_PATH}")" == dopa-ui ]] \
