@@ -45,7 +45,7 @@ struct DaemonInstaller: Sendable {
     layout: DaemonInstallationLayout = DaemonInstallationLayout(),
     bundleURL: URL = Bundle.main.bundleURL,
     userID: UInt32 = geteuid(),
-    runElevated: @escaping ElevatedRunner = DaemonInstaller.runAppleScript
+    runElevated: @escaping ElevatedRunner = PAMAuthorizationRunner.run
   ) {
     self.layout = layout
     bundledDaemonURL = bundleURL.appendingPathComponent("Contents/Helpers/dopa-daemon")
@@ -63,6 +63,7 @@ struct DaemonInstaller: Sendable {
 
   func install() async throws {
     let digest = try await bundledDaemonDigest()
+    try Task.checkCancellation()
     let result = try await runElevated(Self.installCommand(
       daemonURL: bundledDaemonURL, userID: userID, digest: digest))
     guard result.status == 0 else {
@@ -73,9 +74,9 @@ struct DaemonInstaller: Sendable {
 
   func manage(_ command: ServiceCommand) async throws {
     guard isInstalled else { throw DaemonInstallerError.daemonNotInstalled }
-    let digest = try await bundledDaemonDigest()
+    try Task.checkCancellation()
     let result = try await runElevated(Self.serviceCommand(
-      daemonURL: bundledDaemonURL, command: command, digest: digest))
+      daemonURL: layout.executableURL, command: command))
     guard result.status == 0 else {
       throw DaemonInstallerError.authorizationFailed(
         result.standardError.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -83,33 +84,33 @@ struct DaemonInstaller: Sendable {
   }
 
   static func installCommand(daemonURL: URL, userID: UInt32, digest: String) -> String {
-    stagedCommand(
+    verifiedBundledCommand(
       daemonURL: daemonURL, arguments: "install --user \(userID)", digest: digest)
   }
 
   static func serviceCommand(
-    daemonURL: URL, command: ServiceCommand, digest: String
+    daemonURL: URL, command: ServiceCommand
   ) -> String {
-    stagedCommand(daemonURL: daemonURL, arguments: command.rawValue, digest: digest)
+    "exec \(shellQuote(daemonURL.path)) \(command.rawValue)"
   }
 
-  private static func stagedCommand(
+  private static func verifiedBundledCommand(
     daemonURL: URL, arguments: String, digest: String
   ) -> String {
     let source = shellQuote(daemonURL.path)
     return """
-      stage=$(/usr/bin/mktemp -d /private/tmp/dopa-install.XXXXXX) || exit 1
-      trap '/bin/rm -rf "$stage"' EXIT HUP INT TERM
-      /bin/cp \(source) "$stage/dopa-daemon" || exit 1
-      actual=$(/usr/bin/shasum -a 256 "$stage/dopa-daemon" | /usr/bin/awk '{print $1}')
+      source=\(source)
+      if [ -L "$source" ] || [ ! -f "$source" ] || [ ! -x "$source" ]; then
+        echo 'bundled dopa-daemon is not a regular executable' >&2
+        exit 1
+      fi
+      actual=$(/usr/bin/shasum -a 256 "$source" | /usr/bin/awk '{print $1}')
       if [ "$actual" != "\(digest)" ]; then
         echo 'bundled dopa-daemon changed before installation' >&2
         exit 1
       fi
-      /usr/bin/codesign --verify --strict "$stage/dopa-daemon" || exit 1
-      /usr/sbin/chown 0:0 "$stage/dopa-daemon" || exit 1
-      /bin/chmod 0755 "$stage/dopa-daemon" || exit 1
-      "$stage/dopa-daemon" \(arguments)
+      /usr/bin/codesign --verify --strict "$source" || exit 1
+      exec "$source" \(arguments)
       """
   }
 
@@ -149,28 +150,4 @@ struct DaemonInstaller: Sendable {
     "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
   }
 
-  static let elevationScript = """
-    on run argv
-      do shell script (item 1 of argv) with administrator privileges
-    end run
-    """
-
-  static func runAppleScript(_ command: String) async throws -> CommandResult {
-    try await Task.detached {
-      let process = Process()
-      let errors = Pipe()
-      process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-      // The command is an argv value, never interpolated into AppleScript
-      // source. shellQuote protects the bundled executable path from sh.
-      process.arguments = ["-e", elevationScript, command]
-      process.standardOutput = FileHandle.nullDevice
-      process.standardError = errors
-      try process.run()
-      process.waitUntilExit()
-      let data = errors.fileHandleForReading.readDataToEndOfFile()
-      return CommandResult(
-        status: process.terminationStatus,
-        standardError: String(decoding: data, as: UTF8.self))
-    }.value
-  }
 }

@@ -20,7 +20,7 @@ let package = Package(
     .target(name: "DopaAuthorization", linkerSettings: [.linkedFramework("Security")]),
     .target(name: "DopaCore", dependencies: ["CDopa", "DopaProtocol", "DopaAuthorization"]),
     .target(name: "DopaUIModel", dependencies: ["DopaClient", "DopaProtocol", "DopaAuthorization"]),
-    .executableTarget(name: "DopaUI", dependencies: ["DopaUIModel"]),
+    .executableTarget(name: "DopaUI", dependencies: ["DopaUIModel", "CDopa"]),
     .target(name: "DopaManagement", dependencies: ["DopaClient", "DopaProtocol"]),
     .executableTarget(name: "DopaCLI", dependencies: ["DopaClient", "DopaProtocol"]),
     .executableTarget(name: "DopaDaemonCLI", dependencies: ["DopaCore", "DopaManagement", "DopaClient", "DopaProtocol"]),

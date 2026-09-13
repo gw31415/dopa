@@ -60,7 +60,15 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
   private var popoverInitialFocusView: PopoverInitialFocusView?
   private let daemonInstaller = DaemonInstaller()
   private var daemonManagementPromptActive = false
+  private var daemonManagementAlert: NSAlert?
   private var daemonManagementTask: Task<Void, Never>?
+  private var terminationRequested = false
+  private var terminationTask: Task<Void, Never>?
+  private var daemonStartupTransitionActive = false
+  private var daemonStartupTransitionTimeoutTask: Task<Void, Never>?
+  private var daemonInstalled = false
+  private var daemonInstallationMonitorTask: Task<Void, Never>?
+  private var quitKeyMonitor: Any?
   private var connectedSinceLaunch = false
   private var offeredStartupRecovery = false
   private lazy var quitMenu: NSMenu = {
@@ -77,24 +85,73 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     guard let model = Self.model else { return }
+    installApplicationMenu()
+    installQuitKeyMonitor()
+    daemonInstalled = daemonInstaller.isInstalled
     installStatusItem(for: model)
     observeStatus(of: model)
+    beginDaemonInstallationMonitoring()
     connectedSinceLaunch = model.connectionState == .connected
     if daemonUIState == .notInstalled {
       offeredStartupRecovery = true
-      _ = offerDaemonManagement(.install)
+      DispatchQueue.main.async { [weak self] in
+        _ = self?.offerDaemonManagement(.install)
+      }
     } else {
       offerStartupRecoveryIfNeeded(for: model)
     }
   }
 
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    guard terminationTask == nil else { return .terminateLater }
     guard let model = Self.model else { return .terminateNow }
-    Task {
+
+    terminationRequested = true
+    if let alert = daemonManagementAlert {
+      if NSApp.modalWindow === alert.window { NSApp.abortModal() }
+      alert.window.orderOut(nil)
+    }
+    let managementTask = daemonManagementTask
+    managementTask?.cancel()
+    terminationTask = Task { [weak self] in
+      await managementTask?.value
       let canQuit = await model.shutdown()
+      guard let self else {
+        sender.reply(toApplicationShouldTerminate: canQuit)
+        return
+      }
+      terminationTask = nil
+      if !canQuit { terminationRequested = false }
       sender.reply(toApplicationShouldTerminate: canQuit)
     }
     return .terminateLater
+  }
+
+  private func installApplicationMenu() {
+    let mainMenu = NSMenu()
+    mainMenu.autoenablesItems = false
+    let applicationItem = NSMenuItem()
+    let applicationMenu = NSMenu(title: "Dopa")
+    applicationMenu.autoenablesItems = false
+    let quitItem = applicationMenu.addItem(
+      withTitle: "Dopaを終了",
+      action: #selector(terminateFromMenu(_:)),
+      keyEquivalent: "q")
+    quitItem.target = self
+    applicationItem.submenu = applicationMenu
+    mainMenu.addItem(applicationItem)
+    NSApp.mainMenu = mainMenu
+  }
+
+  private func installQuitKeyMonitor() {
+    guard quitKeyMonitor == nil else { return }
+    quitKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+      guard event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command),
+        event.charactersIgnoringModifiers?.lowercased() == "q"
+      else { return event }
+      NSApp.terminate(nil)
+      return nil
+    }
   }
 
   private func installStatusItem(for model: AppModel) {
@@ -148,10 +205,11 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
   private var daemonUIState: DaemonUIState {
     guard let model = Self.model else { return .checking }
     return .resolve(
-      isInstalled: daemonInstaller.isInstalled,
+      isInstalled: daemonInstalled,
       connectionState: model.connectionState,
       isConfirmed: model.snapshot?.isConfirmed == true,
-      hasSessions: !model.sessions.isEmpty)
+      hasSessions: !model.sessions.isEmpty,
+      isStarting: daemonStartupTransitionActive)
   }
 
   private func observeStatus(of model: AppModel) {
@@ -161,7 +219,12 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
     } onChange: { [weak self] in
       Task { @MainActor [weak self] in
         guard let self, let model = Self.model else { return }
-        if model.connectionState == .connected { self.connectedSinceLaunch = true }
+        if model.connectionState == .connected {
+          self.connectedSinceLaunch = true
+          self.daemonStartupTransitionActive = false
+          self.daemonStartupTransitionTimeoutTask?.cancel()
+          self.daemonStartupTransitionTimeoutTask = nil
+        }
         self.updateStatusItem()
         self.offerStartupRecoveryIfNeeded(for: model)
         self.observeStatus(of: model)
@@ -170,12 +233,7 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
   }
 
   @objc private func statusItemAction(_ sender: NSStatusBarButton) {
-    if let action = daemonManagementActionFromStatusItem {
-      popover?.performClose(nil)
-      _ = offerDaemonManagement(action)
-      return
-    }
-
+    refreshDaemonInstallationState()
     if NSApp.currentEvent?.type == .rightMouseUp {
       popover?.performClose(nil)
       if let event = NSApp.currentEvent {
@@ -187,6 +245,12 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
           in: sender
         )
       }
+      return
+    }
+
+    if let action = daemonManagementActionFromStatusItem {
+      popover?.performClose(nil)
+      _ = offerDaemonManagement(action)
       return
     }
 
@@ -226,16 +290,45 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
     #if DOPA_UI_TESTING
     return false
     #else
+    guard !terminationRequested else { return false }
     switch action {
     case .install:
       guard daemonUIState == .notInstalled else { return false }
     case .start:
       guard daemonUIState == .stopped else { return false }
     }
+    guard daemonManagementTask == nil else { return true }
     guard !daemonManagementPromptActive else { return true }
+    guard daemonManagementAlert == nil else { return true }
 
     daemonManagementPromptActive = true
     NSApp.activate(ignoringOtherApps: true)
+    DispatchQueue.main.async { [weak self] in
+      self?.presentDaemonManagement(action)
+    }
+    return true
+    #endif
+  }
+
+  private func presentDaemonManagement(_ action: DaemonManagementAction) {
+    #if !DOPA_UI_TESTING
+    guard !terminationRequested else {
+      daemonManagementPromptActive = false
+      return
+    }
+    switch action {
+    case .install:
+      guard daemonUIState == .notInstalled else {
+        daemonManagementPromptActive = false
+        return
+      }
+    case .start:
+      guard daemonUIState == .stopped else {
+        daemonManagementPromptActive = false
+        return
+      }
+    }
+
     let alert = NSAlert()
     alert.alertStyle = .warning
     switch action {
@@ -247,28 +340,90 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
       alert.informativeText = "Dopaを使用するにはdopa-daemonを起動してください。続けるを選ぶと、管理者認証を求めます。"
     }
     alert.addButton(withTitle: "続ける")
-    alert.addButton(withTitle: "キャンセル")
-    guard alert.runModal() == .alertFirstButtonReturn else {
+    alert.addButton(withTitle: "キャンセル").keyEquivalent = "\u{1B}"
+    guard runFocusedModal(alert) == .alertFirstButtonReturn else {
       daemonManagementPromptActive = false
-      return true
+      return
+    }
+    daemonManagementPromptActive = false
+    refreshDaemonInstallationState()
+    switch action {
+    case .install:
+      guard daemonUIState == .notInstalled else {
+        return
+      }
+    case .start:
+      guard daemonUIState == .stopped else {
+        if daemonUIState == .notInstalled { _ = offerDaemonManagement(.install) }
+        return
+      }
     }
 
+    daemonStartupTransitionActive = true
+    updateStatusItem()
     daemonManagementTask = Task { [weak self] in
       guard let self else { return }
+      var succeeded = false
+      defer {
+        if succeeded, !terminationRequested,
+          Self.model?.connectionState != .connected {
+          beginDaemonStartupTransitionTimeout()
+        } else {
+          daemonStartupTransitionActive = false
+        }
+        refreshDaemonInstallationState()
+        daemonManagementTask = nil
+        updateStatusItem()
+      }
       do {
         switch action {
         case .install: try await daemonInstaller.install()
         case .start: try await daemonInstaller.manage(.start)
         }
+        succeeded = true
       } catch {
-        showDaemonManagementError(error, action: action)
+        if !Task.isCancelled, !terminationRequested {
+          showDaemonManagementError(error, action: action)
+        }
       }
-      daemonManagementPromptActive = false
-      daemonManagementTask = nil
+    }
+    #endif
+  }
+
+  private func beginDaemonStartupTransitionTimeout() {
+    daemonStartupTransitionTimeoutTask?.cancel()
+    daemonStartupTransitionTimeoutTask = Task { [weak self] in
+      try? await Task.sleep(for: .seconds(10))
+      guard !Task.isCancelled, let self,
+        Self.model?.connectionState != .connected else { return }
+      daemonStartupTransitionActive = false
+      daemonStartupTransitionTimeoutTask = nil
       updateStatusItem()
     }
-    return true
-    #endif
+  }
+
+  private func beginDaemonInstallationMonitoring() {
+    daemonInstallationMonitorTask?.cancel()
+    daemonInstallationMonitorTask = Task { [weak self] in
+      while !Task.isCancelled {
+        do { try await Task.sleep(for: .milliseconds(500)) }
+        catch { return }
+        guard let self else { return }
+        refreshDaemonInstallationState()
+      }
+    }
+  }
+
+  private func refreshDaemonInstallationState() {
+    let installed = daemonInstaller.isInstalled
+    guard installed != daemonInstalled else { return }
+    daemonInstalled = installed
+    if !installed {
+      daemonStartupTransitionActive = false
+      daemonStartupTransitionTimeoutTask?.cancel()
+      daemonStartupTransitionTimeoutTask = nil
+    }
+    updateStatusItem()
   }
 
   private func offerStartupRecoveryIfNeeded(for model: AppModel) {
@@ -285,7 +440,13 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
   private func showDaemonManagementError(
     _ error: Error, action: DaemonManagementAction
   ) {
-    NSApp.activate(ignoringOtherApps: true)
+    guard !terminationRequested else { return }
+    presentDaemonManagementError(error, action: action)
+  }
+
+  private func presentDaemonManagementError(
+    _ error: Error, action: DaemonManagementAction
+  ) {
     let alert = NSAlert()
     alert.alertStyle = .critical
     switch action {
@@ -293,7 +454,25 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
     case .start: alert.messageText = "dopa-daemonを起動できませんでした"
     }
     alert.informativeText = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
-    alert.runModal()
+    _ = runFocusedModal(alert)
+  }
+
+  private func runFocusedModal(_ alert: NSAlert) -> NSApplication.ModalResponse {
+    daemonManagementAlert = alert
+    defer {
+      if daemonManagementAlert === alert { daemonManagementAlert = nil }
+    }
+    let window = alert.window
+    let button = alert.buttons.first
+    window.initialFirstResponder = button
+    NSApp.activate(ignoringOtherApps: true)
+    DispatchQueue.main.async {
+      guard window.isVisible else { return }
+      NSApp.activate(ignoringOtherApps: true)
+      window.makeKey()
+      if let button { _ = window.makeFirstResponder(button) }
+    }
+    return alert.runModal()
   }
 
   func popoverWillShow(_ notification: Notification) {

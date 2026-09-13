@@ -6,6 +6,7 @@ enum DaemonUIState: Equatable {
 
   case notInstalled
   case stopped
+  case starting
   case checking
   case idle
   case active
@@ -14,8 +15,10 @@ enum DaemonUIState: Equatable {
     isInstalled: Bool,
     connectionState: AppModel.ConnectionState,
     isConfirmed: Bool,
-    hasSessions: Bool
+    hasSessions: Bool,
+    isStarting: Bool = false
   ) -> Self {
+    if isStarting, connectionState != .connected { return .starting }
     guard isInstalled else { return .notInstalled }
     switch connectionState {
     case .disconnected: return .stopped
@@ -29,6 +32,7 @@ enum DaemonUIState: Equatable {
   var symbol: String {
     switch self {
     case .notInstalled: "moon"
+    case .starting: "moon"
     case .stopped, .checking: "exclamationmark.triangle"
     case .idle: "moon.fill"
     case .active: "cup.and.saucer.fill"
@@ -39,6 +43,7 @@ enum DaemonUIState: Equatable {
     switch self {
     case .notInstalled: "dopa-daemon未インストール"
     case .stopped: "dopa-daemon停止中"
+    case .starting: "dopa-daemon起動準備中"
     default: nil
     }
   }
@@ -47,6 +52,7 @@ enum DaemonUIState: Equatable {
     switch self {
     case .notInstalled: .install
     case .stopped: .start
+    case .starting: .normal
     default: .normal
     }
   }

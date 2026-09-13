@@ -15,6 +15,7 @@ int dopa_unix_peer_uid(int fd, uid_t *uid);
 int dopa_unix_peer_pid(int fd, pid_t *pid);
 int dopa_spawn_guardian(pid_t *pid, const char *executable, char *const arguments[], char *const environment[]);
 int dopa_poll_guardian(pid_t pid, int *status);
+pid_t dopa_spawn_pam_sudo(const char *command, const char *prompt, int *master_fd);
 // Read/write SleepDisabled through the IOKit SPI, never a subprocess.
 int32_t dopa_read_sleep_disabled(int *disabled);
 int32_t dopa_set_sleep_disabled(int disabled);

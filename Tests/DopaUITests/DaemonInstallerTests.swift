@@ -42,7 +42,7 @@ final class DaemonInstallerTests: XCTestCase {
     XCTAssertTrue(command.contains("Contents/Helpers/dopa-daemon"))
     XCTAssertTrue(command.contains("shasum -a 256"))
     XCTAssertTrue(command.contains("codesign --verify --strict"))
-    XCTAssertTrue(DaemonInstaller.elevationScript.contains("with administrator privileges"))
+    XCTAssertFalse(command.contains("/private/tmp"))
   }
 
   func testInstallReportsElevationFailure() async throws {
@@ -59,6 +59,26 @@ final class DaemonInstallerTests: XCTestCase {
     }
   }
 
+  func testCancelledInstallDoesNotBeginElevation() async throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    try fixture.createBundledDaemon()
+    let capture = CommandCapture()
+    let installer = fixture.installer { command in
+      await capture.record(command)
+      return .init(status: 0, standardError: "")
+    }
+
+    let task = Task { try await installer.install() }
+    task.cancel()
+    do {
+      try await task.value
+      XCTFail("expected cancellation")
+    } catch is CancellationError {}
+    let capturedCommand = await capture.value
+    XCTAssertNil(capturedCommand)
+  }
+
   func testInstalledServiceManagementUsesRequestedCommand() async throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
@@ -73,8 +93,8 @@ final class DaemonInstallerTests: XCTestCase {
     try await installer.manage(.start)
     let captured = await capture.capturedValue()
     let command = try XCTUnwrap(captured)
-    XCTAssertTrue(command.contains("Contents/Helpers/dopa-daemon"))
-    XCTAssertTrue(command.hasSuffix("\"$stage/dopa-daemon\" start"))
+    XCTAssertTrue(command.contains("PrivilegedHelperTools/dev.dopa.daemon"))
+    XCTAssertTrue(command.hasSuffix(" start"))
   }
 }
 
