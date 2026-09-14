@@ -98,9 +98,15 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
   private var quitKeyMonitor: Any?
   private var connectedSinceLaunch = false
   private var offeredStartupRecovery = false
+  private lazy var loginItemMenuController = LoginItemMenuController { [weak self] error in
+    self?.presentLoginItemError(error)
+  }
   private lazy var quitMenu: NSMenu = {
     let menu = NSMenu()
     menu.autoenablesItems = false
+    menu.delegate = loginItemMenuController
+    menu.addItem(loginItemMenuController.menuItem)
+    menu.addItem(.separator())
     let item = menu.addItem(
       withTitle: "Dopaを終了",
       action: #selector(terminateFromMenu(_:)),
@@ -611,6 +617,15 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
 
   @objc private func terminateFromMenu(_ sender: NSMenuItem) {
     NSApplication.shared.terminate(nil)
+  }
+
+  private func presentLoginItemError(_ error: any Error) {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "ログイン時の起動設定を変更できませんでした。"
+    alert.informativeText = error.localizedDescription
+    alert.addButton(withTitle: "OK")
+    alert.runModal()
   }
 }
 
