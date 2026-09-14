@@ -74,15 +74,23 @@ for entry in cli_archive_files:
     archive_files.add(entry["archivePath"])
 
 completion_paths = []
-for name, _ in cli_products:
-    for shell, extension, target in (
-        ("bash", "bash", name),
-        ("fish", "fish", None),
-        ("zsh", "zsh", f"_{name}"),
-    ):
+# Cask/StanzaOrder requires repeated completion artifacts to remain grouped by
+# stanza type instead of alternating bash, fish, and zsh for each executable.
+for shell, extension in (
+    ("bash", "bash"),
+    ("fish", "fish"),
+    ("zsh", "zsh"),
+):
+    for name, _ in cli_products:
         archive_path = f"completions/{name}.{extension}"
         if archive_path not in archive_files:
             fail(f"release inventory is missing {shell} completion for {name}")
+        if shell == "fish":
+            target = None
+        elif shell == "bash":
+            target = name
+        else:
+            target = f"_{name}"
         completion_paths.append((shell, archive_path, target))
 
 lines = [
@@ -93,7 +101,7 @@ lines = [
     f'  url "https://github.com/gw31415/dopa/releases/download/v#{{version}}/{app_archive}",',
     '      verified: "github.com/gw31415/dopa/"',
     '  name "Dopa"',
-    '  desc "Prevent a Mac from sleeping only when needed"',
+    '  desc "Prevent system sleep only when needed"',
     '  homepage "https://github.com/gw31415/dopa"',
     "",
     "  depends_on arch: :arm64",

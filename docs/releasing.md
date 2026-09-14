@@ -30,9 +30,10 @@ stable releaseでは、`id-token`権限を持たないjobでCaskの実インス�
 取得してtapのautomation branch、検証status、pull requestの作成に使います。このjobはsourceを
 checkoutせず、release asset、tap script、配布binaryを実行しません。prereleaseもad-hoc署名した
 配布assetの添付までは行いますが、Homebrew tapは更新しません。
-prerelease を後から stable に昇格した場合は、同じ tag で tap 更新まで再実行されます。
 app の version 規約を保つため、prerelease の場合も tag 自体は接尾辞のない `vX.Y.Z`
-形式にします。
+形式にします。GitHubはstable releaseの初回公開時に `published` と `released` の両方を送るため、
+workflowは重複を避けて `published` だけを購読します。prereleaseをstableへ昇格する代わりに、
+検証済みの新しいstable tagとReleaseを作成してください。
 
 ## 公開
 

@@ -2,7 +2,9 @@ name: Release
 
 on:
   release:
-    types: [published, released]
+    # GitHub recommends `published` when both stable and pre-releases should
+    # run. Subscribing to `released` as well creates a duplicate stable run.
+    types: [published]
 
 permissions: {}
 
