@@ -19,21 +19,21 @@ struct DopaPanel: View {
       HStack(alignment: .firstTextBaseline) {
         Text("Dopa").font(.title2.bold())
         Spacer()
-        Label("消灯抑制", systemImage: "display")
+        Label("ディスプレイオフ防止", systemImage: "display")
           .font(.callout)
           .foregroundStyle(.secondary)
           .opacity(model.displaySleepPrevented == true ? 1 : 0)
           .accessibilityHidden(model.displaySleepPrevented != true)
           .allowsHitTesting(model.displaySleepPrevented == true)
           .accessibilityIdentifier("display-sleep-prevented")
-          .help("ディスプレイの消灯を抑制中")
+          .help("ディスプレイがオフにならないようにしています")
         statusControl
       }
       .frame(height: headerHeight)
       .lineLimit(1)
       .popover(isPresented: $showingNotice) {
         VStack(alignment: .leading, spacing: 12) {
-          Text(model.message ?? "dopa-daemonの導入・起動を確認してください。")
+          Text(model.message ?? "dopa-daemonのインストールと起動を確認してください。")
           Button("閉じる") {
             showingNotice = false
             if model.connectionState == .connected { model.message = nil }
@@ -169,7 +169,7 @@ private struct OwnSessionView: View {
         .opacity(!unlimited && model.schedule.basis == basis ? 1 : 0)
         .accessibilityHidden(true)
     }
-    .help(!unlimited && model.schedule.basis == basis ? "固定中：この値を基準に計算します" : "値を変更し始めるとこの入力を固定します")
+    .help(!unlimited && model.schedule.basis == basis ? "固定中：この値を基準に計算します" : "編集し始めると、この入力を固定します")
   }
 
   var body: some View {
@@ -220,25 +220,25 @@ private struct OwnSessionView: View {
       GroupBox {
         VStack(spacing: 12) {
           LabeledContent {
-            Toggle("ディスプレイをスリープさせない", isOn: Binding(
+            Toggle("ディスプレイをオフにしない", isOn: Binding(
               get: { model.options.keepDisplayOn },
               set: { value in
                 var next = model.options; next.keepDisplayOn = value
                 Task { await model.setOptions(next) }
               })).labelsHidden()
           } label: {
-            Text("ディスプレイをスリープさせない").frame(maxWidth: .infinity, alignment: .leading)
+            Text("ディスプレイをオフにしない").frame(maxWidth: .infinity, alignment: .leading)
           }
           Divider()
           LabeledContent {
-            Toggle("ディスプレイを閉じたら停止", isOn: Binding(
+            Toggle("ふたを閉じたら停止", isOn: Binding(
               get: { model.options.stopOnLidClose },
               set: { value in
                 var next = model.options; next.stopOnLidClose = value
                 Task { await model.setOptions(next) }
               })).labelsHidden()
           } label: {
-            Text("ディスプレイを閉じたら停止").frame(maxWidth: .infinity, alignment: .leading)
+            Text("ふたを閉じたら停止").frame(maxWidth: .infinity, alignment: .leading)
           }
         }
         .toggleStyle(.switch)
@@ -299,7 +299,7 @@ private struct OwnSessionView: View {
       .disabled(unlimited)
       .accessibilityLabel(durationLabel + (!unlimited && model.schedule.basis == .duration ? "、固定中" : ""))
       .accessibilityIdentifier("duration-input")
-      .help(errorText ?? "Enterで編集、左右キーで項目移動、上下キーで増減、Tabで次の入力欄へ")
+      .help(errorText ?? "Enterで編集、左右キーで項目を移動、上下キーで増減、Tabで次の入力欄へ移動")
       .popover(isPresented: errorPresentation(for: .duration), arrowEdge: .bottom) {
         validationPopover(for: .duration)
       }
@@ -385,7 +385,7 @@ private struct SessionsView: View {
                 .lineLimit(1).truncationMode(.middle)
               Text(session.id == model.ownSessionID ? "このアプリ" : "PID \(String(session.peerPID))")
                 .font(.caption).foregroundStyle(.secondary)
-              Text("消灯抑制 \(session.options.keepDisplayOn ? "オン" : "オフ") · 閉じたら停止 \(session.options.stopOnLidClose ? "オン" : "オフ")")
+              Text("ディスプレイオフ防止 \(session.options.keepDisplayOn ? "オン" : "オフ") · ふたを閉じたら停止 \(session.options.stopOnLidClose ? "オン" : "オフ")")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -443,7 +443,7 @@ private struct SessionsView: View {
     }.joined(separator: "\n")
     let ids = Set(confirmation.map(\.id))
     let remains = model.sessions.contains { !ids.contains($0.id) }
-    let result = remains ? "ほかの使用元のスリープ防止は継続します。" : "対象の停止後、Dopaによるスリープ防止が解除されます。"
+    let result = remains ? "ほかのアプリやCLIのスリープ防止は継続します。" : "停止すると、Dopaによるスリープ防止がすべて解除されます。"
     return "\(targets)\n\n\(result)"
   }
   private func stopConfirmed() {

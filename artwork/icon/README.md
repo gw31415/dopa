@@ -2,7 +2,7 @@
 
 ## 月とコーヒー
 
-Dopaの正式なアプリアイコンは、カップから注いだコーヒーが三日月へ流れ、手前へ長く垂れるシンボル。Caffeineのカップ単体やAmphetamineのカプセルとは異なり、月と注ぐ動作の組み合わせでDopaを表す。
+Dopaの正式なアプリアイコンは、カップから注いだコーヒーが三日月に向かって流れ、手前に長く垂れるシンボル。Caffeineのカップ単体やAmphetamineのカプセルとは異なり、月と注ぐ動作の組み合わせでDopaを表す。
 
 `Dopa.svg`は形状と配色の統合原稿。背景・月・カップ・コーヒーを編集可能なグループに分け、画像トレース、埋め込みビットマップ、フォント、フィルターを含まない。`moon-coffee-preview.html`では原稿を大きな表示と128 / 64 / 32pxで確認できる。
 
@@ -34,6 +34,6 @@ mise exec -- bash artwork/icon/render.sh
 mise exec -- scripts/build-app.sh
 ```
 
-ビルドは`.icon`を`actool`でmacOS 26.0向けにコンパイルし、ベクターレイヤーを含む`Assets.car`と互換用`Dopa.icns`をアプリへ配置する。`.icns`を手作業で管理する必要はない。ビルドスクリプトが最終Info.plistへ`CFBundleIconName`と`CFBundleIconFile`を設定する。メニューバーの状態表示用SF Symbolsは別用途のため既存のまま。
+ビルドは`.icon`を`actool`でmacOS 26.0向けにコンパイルし、ベクターレイヤーを含む`Assets.car`と互換用`Dopa.icns`をアプリへ配置する。`.icns`を手作業で管理する必要はない。ビルドスクリプトが最終Info.plistへ`CFBundleIconName`と`CFBundleIconFile`を設定する。メニューバーの状態表示に使うSF Symbolsは別用途のため、現状のまま維持する。
 
 参考: [Apple Icon Composer](https://developer.apple.com/icon-composer/)、[Creating your app icon using Icon Composer](https://developer.apple.com/documentation/xcode/creating-your-app-icon-using-icon-composer)。

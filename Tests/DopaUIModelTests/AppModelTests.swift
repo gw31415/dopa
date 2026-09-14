@@ -187,7 +187,7 @@ final class AppModelTests: XCTestCase {
 
     try await model.connectOnce()
     XCTAssertEqual(model.connectionState, .connected)
-    XCTAssertEqual(model.status, "他プロセスで動作中")
+    XCTAssertEqual(model.status, "他のアプリやCLIが動作中")
 
     await transport.setPollFailure(.disconnected)
     do {
@@ -199,14 +199,14 @@ final class AppModelTests: XCTestCase {
 
     XCTAssertEqual(model.connectionState, .disconnected)
     XCTAssertNil(model.snapshot)
-    XCTAssertEqual(model.status, "接続を確認できません")
+    XCTAssertEqual(model.status, "接続できません")
     XCTAssertNotEqual(model.status, "オフ")
 
     await transport.setPollFailure(nil)
     try await model.connectOnce()
 
     XCTAssertEqual(model.connectionState, .connected)
-    XCTAssertEqual(model.status, "他プロセスで動作中")
+    XCTAssertEqual(model.status, "他のアプリやCLIが動作中")
     let methods = await transport.requestMethods()
     let connectCount = await transport.connectCount()
     XCTAssertFalse(methods.contains("session.acquire"), "reconnect must only observe the daemon")

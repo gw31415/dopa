@@ -95,7 +95,7 @@ function render() {
   const status = schedule.running ? 'own' : cliSessions.length > 0 ? 'other' : 'inactive';
   const statusLabel = {
     own: 'スリープ防止中',
-    other: '他プロセスで動作中',
+    other: '他のアプリやCLIが動作中',
     inactive: 'オフ',
   }[status];
   $('#status').dataset.state = status;
@@ -196,7 +196,7 @@ function openStopDialog(targets, all = false) {
   } else {
     const remainingCliCount = cliSessions.length - cliTargetIds(targets).length;
     const remaining = [];
-    if (remainingCliCount > 0) remaining.push(remainingCliCount === 1 ? '他のCLI' : `他の${remainingCliCount}件のCLI`);
+    if (remainingCliCount > 0) remaining.push(remainingCliCount === 1 ? 'ほかのCLI' : `ほかの${remainingCliCount}件のCLI`);
     if (schedule.running) remaining.push('このアプリ');
     $('#stop-description').textContent = remaining.length
       ? `このCLIのスリープ防止を停止します。${remaining.join('と')}のスリープ防止は継続します。`

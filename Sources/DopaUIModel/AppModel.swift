@@ -63,12 +63,12 @@ public final class AppModel {
   }
   public var status: String {
     guard connectionState == .connected else {
-      return connectionState == .connecting ? "接続中" : "接続を確認できません"
+      return connectionState == .connecting ? "接続中" : "接続できません"
     }
     guard let snapshot, snapshot.isConfirmed else { return "電源状態を確認できません" }
     if cleanupUnconfirmed && ownSessionID == nil { return "停止を確認中" }
     if let ownSessionID, sessions.contains(where: { $0.id == ownSessionID }) { return "スリープ防止中" }
-    return sessions.isEmpty ? "オフ" : "他プロセスで動作中"
+    return sessions.isEmpty ? "オフ" : "他のアプリやCLIが動作中"
   }
   public var statusSymbol: String {
     guard connectionState == .connected, snapshot?.isConfirmed == true else { return "exclamationmark.triangle" }
@@ -285,7 +285,7 @@ public final class AppModel {
         message = "スリープ防止は終了しましたが、電源設定の復元を確認できません。"
       } else {
         switch event["data"]?["reason"]?.stringValue {
-        case "lid_closed": message = "ディスプレイを閉じたため停止しました。"
+        case "lid_closed": message = "ふたを閉じたため停止しました。"
         case "daemon_shutdown": message = "サービスの終了により停止しました。"
         case "user_stopped": message = "全体管理の操作により停止しました。"
         default: message = "サービスによりスリープ防止が終了しました。"
@@ -310,7 +310,7 @@ public final class AppModel {
     // transition was already applied. Keep the message current and the transport
     // closed without bumping connectionGeneration a second time.
     if connectionState == .disconnected, snapshot == nil, ownSessionID == nil {
-      message = "サービスに接続できません。dopa-daemonの導入・起動を確認してください。\n\(error)"
+      message = "サービスに接続できません。dopa-daemonのインストールと起動を確認してください。\n\(error)"
       await closeTransport()
       return
     }
@@ -321,7 +321,7 @@ public final class AppModel {
     ownSessionID = nil
     capabilities = []
     if schedule.running { schedule.stop() }
-    message = "サービスに接続できません。dopa-daemonの導入・起動を確認してください。\n\(error)"
+    message = "サービスに接続できません。dopa-daemonのインストールと起動を確認してください。\n\(error)"
     await closeTransport()
   }
 
@@ -401,7 +401,7 @@ public final class AppModel {
     }
     if let remote = error as? DopaRemoteError {
       switch remote.code {
-      case "lid_closed": message = "ディスプレイが閉じています。開いてから操作してください。"
+      case "lid_closed": message = "ふたが閉じています。開いてから操作してください。"
       case "permission_denied": message = "停止に必要な管理者権限を確認できませんでした。"
       case "recovery_failed": message = "電源設定の復元を確認できません。サービスの状態を確認してください。"
       case "power_conflict": message = "ほかのツールがスリープ設定を変更しているため開始できません。"
@@ -552,7 +552,7 @@ public final class AppModel {
       guard ownSessionID == nil, connectionState == .connected, snapshot?.isConfirmed == true else { return false }
     }
     guard !cleanupUnconfirmed else {
-      message = "自分のセッションの停止・復元をまだ確認できません。サービスの接続と状態を確認してください。"
+      message = "自分のセッションの停止と電源設定の復元を確認できていません。サービスへの接続と状態を確認してください。"
       return false
     }
     // Flag first: a poll blocked in the transport is released by close()

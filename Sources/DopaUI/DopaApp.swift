@@ -10,7 +10,7 @@ enum DopaEntryPoint {
     if #available(macOS 26.0, *) { DopaApp.main() }
     else {
       let alert = NSAlert()
-      alert.messageText = "Dopa UIにはmacOS 26以降が必要です。"
+      alert.messageText = "Dopa の実行にはmacOS 26以降が必要です。"
       alert.runModal()
     }
   }
@@ -372,10 +372,10 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
     switch action {
     case .install:
       alert.messageText = "dopa-daemonがインストールされていません"
-      alert.informativeText = "Dopaを使用するにはdopa-daemonのインストールが必要です。続けるを選ぶと、管理者認証を求めます。"
+      alert.informativeText = "インストールが必要です。続けますか？（管理者権限が必要です）"
     case .start:
       alert.messageText = "dopa-daemonが停止しています"
-      alert.informativeText = "Dopaを使用するにはdopa-daemonを起動してください。続けるを選ぶと、管理者認証を求めます。"
+      alert.informativeText = "起動しますか？（管理者権限が必要です）"
     }
     alert.addButton(withTitle: "続ける")
     alert.addButton(withTitle: "キャンセル").keyEquivalent = "\u{1B}"
@@ -449,7 +449,7 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
     alert.alertStyle = .critical
     alert.messageText = "dopa-daemonとの接続を確認できませんでした"
     alert.informativeText =
-      "dopa-daemonのインストールまたは起動後、10秒以内に接続できませんでした。サービスの状態を確認して再試行してください。"
+      "10秒待っても応答がありませんでした。サービスの状態を確認して再試行してください。"
     _ = runFocusedModal(alert)
   }
 
