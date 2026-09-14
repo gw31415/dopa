@@ -96,7 +96,7 @@ private actor PositionTransport: DaemonTransport {
   private var status: JSONValue {
     let session: JSONValue = .object([
       "id": .string("position-own"), "clientName": .string("Dopa UI"), "peerPID": .number(123),
-      "options": .object(["keepDisplayOn": .bool(false), "stopOnLidClose": .bool(false)]),
+      "options": .object(["keepDisplayOn": .bool(false)]),
     ])
     return .object([
       "instanceId": .string("position-test"), "revision": .string(String(revision)),

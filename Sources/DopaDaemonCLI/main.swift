@@ -243,7 +243,7 @@ private func run() throws {
         socketPath: DaemonLayout.system.socketPath,
         allowedUID: configuration.allowedUID,
         power: NativePower(),
-        controls: NativeControls(),
+        controls: NativeDisplayControls(),
         requireRoot: true)
     } catch {
       throw DaemonCLIError("daemon stopped: \(error)", status: 1)

@@ -212,7 +212,7 @@ final class DopaConnectionTests: XCTestCase {
         "event": .string("session.ended"),
         "data": .object([
           "sessionId": .string(sessionID),
-          "reason": .string("lid_closed"),
+          "reason": .string("user_stopped"),
           "cleanup": .string("confirmed"),
         ]),
       ])))

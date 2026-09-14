@@ -1,5 +1,6 @@
 import DopaClient
 import DopaAuthorization
+import DopaLid
 import DopaProtocol
 import Foundation
 import Observation
@@ -15,7 +16,7 @@ final class AppModelTests: XCTestCase {
     let transport = MockDaemonTransport(
       handshake: DaemonHandshake(capabilities: [], snapshot: try DaemonSnapshot(idle)),
       statusValue: idle)
-    let model = AppModel(transport: transport)
+    let model = AppModel(transport: transport, lidState: MockLidState())
     try await model.connectOnce()
 
     let changed = expectation(description: "identical snapshot must not be republished")
@@ -42,7 +43,7 @@ final class AppModelTests: XCTestCase {
     let transport = MockDaemonTransport(
       handshake: DaemonHandshake(capabilities: [], snapshot: try DaemonSnapshot(idle)),
       statusValue: running)
-    let model = AppModel(transport: transport)
+    let model = AppModel(transport: transport, lidState: MockLidState())
     try await model.connectOnce()
     model.editDuration("01:20:00")
     await model.advanceClock(to: Date().addingTimeInterval(-0.25))
@@ -226,7 +227,7 @@ final class AppModelTests: XCTestCase {
       handshake: DaemonHandshake(capabilities: [], snapshot: try DaemonSnapshot(idle)),
       statusValue: running
     )
-    let model = AppModel(transport: transport)
+    let model = AppModel(transport: transport, lidState: MockLidState())
     try await model.connectOnce()
     await model.start()
     XCTAssertEqual(model.ownSessionID, "own")
@@ -283,6 +284,109 @@ final class AppModelTests: XCTestCase {
     XCTAssertFalse(model.schedule.running)
     XCTAssertNil(model.schedule.draft)
     XCTAssertEqual(model.message, "全体管理の操作により停止しました。")
+  }
+
+  func testLidPolicyStaysLocalAndDaemonPayloadOnlyContainsDisplayOption() async throws {
+    let idle = modelSnapshotJSON(phase: "idle")
+    let running = modelSnapshotJSON(
+      revision: "3", phase: "active",
+      sessions: [modelSessionJSON(id: "own", clientName: "Dopa UI", pid: 2187)],
+      systemSleepDisabled: true)
+    let transport = MockDaemonTransport(
+      handshake: DaemonHandshake(capabilities: [], snapshot: try DaemonSnapshot(idle)),
+      statusValue: running)
+    let lid = MockLidState()
+    let model = AppModel(transport: transport, lidState: lid)
+    try await model.connectOnce()
+
+    await model.setOptions(SessionOptions(stopOnLidClose: true))
+    await model.start()
+
+    XCTAssertTrue(model.options.stopOnLidClose, "snapshot refresh must preserve client-local policy")
+    let requests = await transport.recordedRequests()
+    let acquire = try XCTUnwrap(requests.first {
+      $0.method == "session.acquire"
+    })
+    XCTAssertEqual(acquire.params["options"], .object(["keepDisplayOn": .bool(false)]))
+
+    let updateCount = await transport.requestMethods().filter { $0 == "session.update" }.count
+    await model.setOptions(SessionOptions(keepDisplayOn: false, stopOnLidClose: false))
+    let updatedCount = await transport.requestMethods().filter { $0 == "session.update" }.count
+    XCTAssertEqual(
+      updatedCount, updateCount,
+      "changing the client-only lid policy must not update the daemon session")
+  }
+
+  func testClosedLidPreventsStartWithoutAcquiring() async throws {
+    let idle = modelSnapshotJSON(phase: "idle")
+    let transport = MockDaemonTransport(
+      handshake: DaemonHandshake(capabilities: [], snapshot: try DaemonSnapshot(idle)),
+      statusValue: idle)
+    let lid = MockLidState()
+    let model = AppModel(transport: transport, lidState: lid)
+    try await model.connectOnce()
+    await model.setOptions(SessionOptions(stopOnLidClose: true))
+    lid.set(.closed)
+    await model.start()
+
+    XCTAssertTrue(model.options.stopOnLidClose)
+    let methods = await transport.requestMethods()
+    XCTAssertFalse(methods.contains("session.acquire"))
+    XCTAssertEqual(model.message, "ふたが閉じています。開いてから操作してください。")
+  }
+
+  func testLidClosureReleasesOnlyTheOwnedSession() async throws {
+    let idle = modelSnapshotJSON(phase: "idle")
+    let running = modelSnapshotJSON(
+      revision: "3", phase: "active",
+      sessions: [modelSessionJSON(id: "own", clientName: "Dopa UI", pid: 2187)],
+      systemSleepDisabled: true)
+    let transport = MockDaemonTransport(
+      handshake: DaemonHandshake(capabilities: [], snapshot: try DaemonSnapshot(idle)),
+      statusValue: running)
+    let lid = MockLidState()
+    let model = AppModel(transport: transport, lidState: lid)
+    try await model.connectOnce()
+    await model.setOptions(SessionOptions(stopOnLidClose: true))
+    await model.start()
+
+    lid.set(.closed)
+    let deadline = Date().addingTimeInterval(2)
+    while model.ownSessionID != nil, Date() < deadline {
+      try await Task.sleep(nanoseconds: 20_000_000)
+    }
+
+    XCTAssertNil(model.ownSessionID)
+    XCTAssertEqual(model.message, "ふたを閉じたため停止しました。")
+    let releaseCount = await transport.requestMethods().filter { $0 == "session.release" }.count
+    XCTAssertEqual(releaseCount, 1)
+  }
+
+  func testLidReadFailureReleasesTheOwnedSessionAndReportsIt() async throws {
+    let idle = modelSnapshotJSON(phase: "idle")
+    let running = modelSnapshotJSON(
+      revision: "3", phase: "active",
+      sessions: [modelSessionJSON(id: "own", clientName: "Dopa UI", pid: 2187)],
+      systemSleepDisabled: true)
+    let transport = MockDaemonTransport(
+      handshake: DaemonHandshake(capabilities: [], snapshot: try DaemonSnapshot(idle)),
+      statusValue: running)
+    let lid = MockLidState()
+    let model = AppModel(transport: transport, lidState: lid)
+    try await model.connectOnce()
+    await model.setOptions(SessionOptions(stopOnLidClose: true))
+    await model.start()
+
+    lid.set(.failed)
+    let deadline = Date().addingTimeInterval(2)
+    while model.ownSessionID != nil, Date() < deadline {
+      try await Task.sleep(nanoseconds: 20_000_000)
+    }
+
+    XCTAssertNil(model.ownSessionID)
+    XCTAssertTrue(model.message?.contains("ふたの状態を確認できなかったため停止しました") == true)
+    let releaseCount = await transport.requestMethods().filter { $0 == "session.release" }.count
+    XCTAssertEqual(releaseCount, 1)
   }
 
   func testExpiryReleasesWhileExternalAuthorizationIsStillPending() async throws {
@@ -742,6 +846,10 @@ private actor MockDaemonTransport: DaemonTransport {
     requests.map(\.method)
   }
 
+  func recordedRequests() -> [Request] {
+    requests
+  }
+
   func connectCount() -> Int {
     connects
   }
@@ -909,6 +1017,35 @@ private actor AuthorizationSuspension {
   }
 }
 
+private final class MockLidState: LidStateReading, @unchecked Sendable {
+  enum Value { case open, closed, failed }
+  enum Failure: Error { case unavailable }
+
+  private let lock = NSLock()
+  private var value: Value
+
+  init(_ value: Value = .open) {
+    self.value = value
+  }
+
+  func set(_ value: Value) {
+    lock.lock()
+    self.value = value
+    lock.unlock()
+  }
+
+  func isClosed() throws -> Bool {
+    lock.lock()
+    let value = self.value
+    lock.unlock()
+    switch value {
+    case .open: return false
+    case .closed: return true
+    case .failed: throw Failure.unavailable
+    }
+  }
+}
+
 private func modelSnapshotJSON(
   instanceID: String = "daemon-a",
   revision: String = "1",
@@ -936,17 +1073,13 @@ private func modelSessionJSON(
   clientName: String,
   pid: Int32,
   keepDisplayOn: Bool = false,
-  stopOnLidClose: Bool = false,
   peerUID: UInt32? = nil
 ) -> JSONValue {
   var fields: [String: JSONValue] = [
     "id": .string(id),
     "clientName": .string(clientName),
     "peerPID": .number(Double(pid)),
-    "options": .object([
-      "keepDisplayOn": .bool(keepDisplayOn),
-      "stopOnLidClose": .bool(stopOnLidClose),
-    ]),
+    "options": .object(["keepDisplayOn": .bool(keepDisplayOn)]),
   ]
   if let peerUID { fields["peerUID"] = .number(Double(peerUID)) }
   return .object(fields)

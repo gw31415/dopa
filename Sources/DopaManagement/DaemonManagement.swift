@@ -1392,9 +1392,8 @@ public enum DaemonStatusFormatter {
         let pid = numberText(session["peerPID"]) ?? "?"
         let options = session["options"]
         let displayOption = options?["keepDisplayOn"]?.boolValue == true ? "on" : "off"
-        let lidOption = options?["stopOnLidClose"]?.boolValue == true ? "on" : "off"
         lines.append(
-          "session \(id): client=\(name) uid=\(uid) pid=\(pid) display=\(displayOption) lid-close=\(lidOption)")
+          "session \(id): client=\(name) uid=\(uid) pid=\(pid) display=\(displayOption)")
       }
     }
     if let error = snapshot["lastError"], case .object = error {

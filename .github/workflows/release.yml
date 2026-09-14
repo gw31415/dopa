@@ -1,0 +1,504 @@
+name: Release
+
+on:
+  release:
+    types: [published, released]
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  publish-release-assets:
+    runs-on: macos-26
+    concurrency:
+      group: dopa-release-assets-${{ github.event.release.tag_name }}
+      cancel-in-progress: false
+    outputs:
+      app-archive: ${{ steps.published-assets.outputs.app-archive }}
+      app-sha256: ${{ steps.published-assets.outputs.app-sha256 }}
+      bundle-name: ${{ steps.published-assets.outputs.bundle-name }}
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      RELEASE_SHA: ${{ github.sha }}
+    steps:
+      - name: Check out the released source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate the release tag
+        run: |
+          set -euo pipefail
+          [[ "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::Release tag must have the form vX.Y.Z: ${RELEASE_TAG}"
+            exit 1
+          }
+          [[ "$(git rev-parse HEAD)" == "${RELEASE_SHA}" ]] || {
+            echo "::error::Checked-out commit does not match the release event SHA"
+            exit 1
+          }
+          [[ "$(git rev-list -n 1 "${RELEASE_TAG}")" == "${RELEASE_SHA}" ]] || {
+            echo "::error::${RELEASE_TAG} moved after the release event; refusing to build a different commit"
+            exit 1
+          }
+
+      - name: Install the locked toolchain
+        uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3
+        with:
+          install: true
+          cache: true
+
+      - name: Reuse a complete immutable asset set when available
+        id: asset-preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          app_archive=$(mise exec -- python -c \
+            'import json; print(json.load(open("release/artifacts.json"))["appArchive"])')
+          cli_archive=$(mise exec -- python -c \
+            'import json; print(json.load(open("release/artifacts.json"))["cliArchive"])')
+          printf '%s\n' \
+            "${app_archive}" \
+            "${cli_archive}" \
+            release-manifest.json \
+            SHA256SUMS | LC_ALL=C sort >expected-assets.txt
+          gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --json assets --jq '.assets[].name' | LC_ALL=C sort >published-assets.txt
+          if diff -q expected-assets.txt published-assets.txt >/dev/null; then
+            published_dir="${RUNNER_TEMP}/preflight-published-assets"
+            mkdir -p "${published_dir}"
+            gh release download "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+              --dir "${published_dir}"
+            mise exec -- python scripts/verify_published_release.py \
+              "${RELEASE_TAG}" "${published_dir}"
+            echo "reuse=true" >>"${GITHUB_OUTPUT}"
+          else
+            echo "reuse=false" >>"${GITHUB_OUTPUT}"
+          fi
+
+      - name: Require macOS distribution credentials
+        if: ${{ steps.asset-preflight.outputs.reuse != 'true' }}
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          missing=0
+          require_secret() {
+            if [[ -z "$2" ]]; then
+              echo "::error::Missing Actions secret: $1"
+              missing=1
+            fi
+          }
+          require_secret MACOS_CERTIFICATE_P12_BASE64 "${MACOS_CERTIFICATE_P12_BASE64}"
+          require_secret MACOS_CERTIFICATE_PASSWORD "${MACOS_CERTIFICATE_PASSWORD}"
+          require_secret APPLE_NOTARY_KEY_P8_BASE64 "${APPLE_NOTARY_KEY_P8_BASE64}"
+          require_secret APPLE_NOTARY_KEY_ID "${APPLE_NOTARY_KEY_ID}"
+          require_secret APPLE_NOTARY_ISSUER_ID "${APPLE_NOTARY_ISSUER_ID}"
+          [[ "${missing}" == 0 ]]
+          [[ "${APPLE_NOTARY_KEY_ID}" =~ ^[A-Z0-9]+$ ]] || {
+            echo "::error::APPLE_NOTARY_KEY_ID must contain only uppercase letters and digits."
+            exit 1
+          }
+          [[ "${APPLE_NOTARY_ISSUER_ID}" =~ ^[0-9A-Fa-f-]{36}$ ]] || {
+            echo "::error::APPLE_NOTARY_ISSUER_ID must be a UUID."
+            exit 1
+          }
+
+      - name: Import the Developer ID certificate
+        if: ${{ steps.asset-preflight.outputs.reuse != 'true' }}
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          certificate_path="${RUNNER_TEMP}/dopa-developer-id.p12"
+          keychain_path="${RUNNER_TEMP}/dopa-signing.keychain-db"
+          keychain_password=$(openssl rand -hex 32)
+          echo "::add-mask::${keychain_password}"
+
+          printf '%s' "${MACOS_CERTIFICATE_P12_BASE64}" \
+            | base64 --decode >"${certificate_path}"
+          security create-keychain -p "${keychain_password}" "${keychain_path}"
+          security set-keychain-settings -lut 21600 "${keychain_path}"
+          security unlock-keychain -p "${keychain_password}" "${keychain_path}"
+          security import "${certificate_path}" \
+            -k "${keychain_path}" \
+            -P "${MACOS_CERTIFICATE_PASSWORD}" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "${keychain_password}" "${keychain_path}"
+
+          identity_count=$(security find-identity -v -p codesigning "${keychain_path}" \
+            | grep -c '"Developer ID Application:' || true)
+          [[ "${identity_count}" == 1 ]] || {
+            echo "::error::The certificate secret must contain exactly one valid Developer ID Application identity."
+            exit 1
+          }
+          identity=$(security find-identity -v -p codesigning "${keychain_path}" \
+            | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p')
+          {
+            echo "DOPA_CODESIGN_IDENTITY=${identity}"
+            echo "DOPA_CODESIGN_KEYCHAIN=${keychain_path}"
+            echo "DOPA_SIGNING_KEYCHAIN_PASSWORD=${keychain_password}"
+          } >>"${GITHUB_ENV}"
+          rm -f "${certificate_path}"
+
+      - name: Test and build every distributable
+        if: ${{ steps.asset-preflight.outputs.reuse != 'true' }}
+        run: |
+          set -euo pipefail
+          security unlock-keychain \
+            -p "${DOPA_SIGNING_KEYCHAIN_PASSWORD}" "${DOPA_CODESIGN_KEYCHAIN}"
+          make check app
+          for signed_item in \
+            .build/Dopa.app \
+            .build/Dopa.app/Contents/MacOS/dopa-ui \
+            .build/Dopa.app/Contents/Helpers/dopa \
+            .build/Dopa.app/Contents/Helpers/dopa-daemon; do
+            signature=$(codesign -dvvv "${signed_item}" 2>&1)
+            grep -F 'Authority=Developer ID Application:' <<<"${signature}"
+            grep -F '(runtime)' <<<"${signature}"
+            grep -F 'Timestamp=' <<<"${signature}"
+          done
+
+      - name: Notarize and staple the app
+        if: ${{ steps.asset-preflight.outputs.reuse != 'true' }}
+        env:
+          APPLE_NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          notary_key_path="${RUNNER_TEMP}/AuthKey_${APPLE_NOTARY_KEY_ID}.p8"
+          notary_archive="${RUNNER_TEMP}/Dopa-notarization.zip"
+          cleanup_notary_key() {
+            rm -f "${notary_key_path}"
+          }
+          trap cleanup_notary_key EXIT
+
+          printf '%s' "${APPLE_NOTARY_KEY_P8_BASE64}" \
+            | base64 --decode >"${notary_key_path}"
+          ditto -c -k --sequesterRsrc --keepParent \
+            .build/Dopa.app "${notary_archive}"
+          xcrun notarytool submit "${notary_archive}" \
+            --key "${notary_key_path}" \
+            --key-id "${APPLE_NOTARY_KEY_ID}" \
+            --issuer "${APPLE_NOTARY_ISSUER_ID}" \
+            --wait
+          xcrun stapler staple .build/Dopa.app
+          xcrun stapler validate .build/Dopa.app
+          spctl --assess --type execute --verbose=4 .build/Dopa.app
+
+      - name: Package and verify release assets
+        if: ${{ steps.asset-preflight.outputs.reuse != 'true' }}
+        env:
+          DOPA_REQUIRE_NOTARIZATION: "1"
+        run: |
+          set -euo pipefail
+          ./scripts/package-release.sh "${RELEASE_TAG}"
+
+      - name: Publish or reuse the complete immutable asset set
+        id: published-assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSETS_REUSABLE: ${{ steps.asset-preflight.outputs.reuse }}
+        run: |
+          set -euo pipefail
+          app_archive=$(mise exec -- python -c \
+            'import json; print(json.load(open("release/artifacts.json"))["appArchive"])')
+          cli_archive=$(mise exec -- python -c \
+            'import json; print(json.load(open("release/artifacts.json"))["cliArchive"])')
+          bundle_name=$(mise exec -- python -c \
+            'import json; print(json.load(open("release/artifacts.json"))["bundleName"])')
+          printf '%s\n' \
+            "${app_archive}" \
+            "${cli_archive}" \
+            release-manifest.json \
+            SHA256SUMS | LC_ALL=C sort >expected-assets.txt
+          assets=()
+          if [[ "${ASSETS_REUSABLE}" != true ]]; then
+            assets=(dist/*)
+            [[ -e "${assets[0]}" ]] || {
+              echo "::error::The release packager produced no assets"
+              exit 1
+            }
+            for asset in "${assets[@]}"; do basename "${asset}"; done \
+              | LC_ALL=C sort >packaged-assets.txt
+            diff -u expected-assets.txt packaged-assets.txt
+          fi
+
+          marker_name=dopa-release-upload-in-progress.txt
+          {
+            cat expected-assets.txt
+            echo "${marker_name}"
+          } | LC_ALL=C sort >transaction-assets.txt
+          gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --json assets --jq '.assets[].name' | LC_ALL=C sort >published-assets.txt
+
+          if grep -Fxq "${marker_name}" published-assets.txt; then
+            unexpected=$(comm -23 published-assets.txt transaction-assets.txt)
+            if [[ -n "${unexpected}" ]]; then
+              echo "::error::The interrupted upload also contains unexpected assets: ${unexpected}"
+              exit 1
+            fi
+            while IFS= read -r published_asset; do
+              [[ "${published_asset}" == "${marker_name}" ]] && continue
+              gh release delete-asset "${RELEASE_TAG}" "${published_asset}" \
+                --yes --repo "${GITHUB_REPOSITORY}"
+            done <published-assets.txt
+            # The marker is the proof that every other asset in this set is
+            # safe for automatic recovery. Delete it only after all data
+            # assets, so an interrupted cleanup remains recoverable.
+            gh release delete-asset "${RELEASE_TAG}" "${marker_name}" \
+              --yes --repo "${GITHUB_REPOSITORY}"
+            : >published-assets.txt
+          fi
+
+          if [[ -s published-assets.txt ]]; then
+            if ! diff -u expected-assets.txt published-assets.txt; then
+              echo "::error::The release has a partial or unexpected asset set without an upload transaction marker. Refusing to replace it."
+              exit 1
+            fi
+            published_dir="${RUNNER_TEMP}/published-release-assets"
+            mkdir -p "${published_dir}"
+            gh release download "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+              --dir "${published_dir}"
+            (cd "${published_dir}" && shasum -a 256 -c SHA256SUMS)
+          else
+            marker_path="${RUNNER_TEMP}/${marker_name}"
+            printf 'workflow=%s\nrun=%s\n' "${GITHUB_WORKFLOW}" "${GITHUB_RUN_ID}" \
+              >"${marker_path}"
+            gh release upload "${RELEASE_TAG}" "${marker_path}" --repo "${GITHUB_REPOSITORY}"
+            # Leave the marker behind if this non-atomic upload is interrupted.
+            # A retry can then prove that the partial set belongs to this workflow.
+            gh release upload "${RELEASE_TAG}" "${assets[@]}" --repo "${GITHUB_REPOSITORY}"
+            gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+              --json assets --jq '.assets[].name' | LC_ALL=C sort >published-assets.txt
+            if ! diff -u transaction-assets.txt published-assets.txt; then
+              echo "::error::The upload transaction did not publish the complete asset set"
+              exit 1
+            fi
+            gh release delete-asset "${RELEASE_TAG}" "${marker_name}" \
+              --yes --repo "${GITHUB_REPOSITORY}"
+            gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+              --json assets --jq '.assets[].name' | LC_ALL=C sort >published-assets.txt
+            diff -u expected-assets.txt published-assets.txt
+            published_dir=dist
+          fi
+
+          mise exec -- python scripts/verify_published_release.py \
+            "${RELEASE_TAG}" "${published_dir}"
+          app_sha=$(shasum -a 256 "${published_dir}/${app_archive}" | awk '{print $1}')
+          echo "app-archive=${app_archive}" >>"${GITHUB_OUTPUT}"
+          echo "app-sha256=${app_sha}" >>"${GITHUB_OUTPUT}"
+          echo "bundle-name=${bundle_name}" >>"${GITHUB_OUTPUT}"
+
+      - name: Delete the temporary signing keychain
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${DOPA_CODESIGN_KEYCHAIN:-}" && -f "${DOPA_CODESIGN_KEYCHAIN}" ]]; then
+            security delete-keychain "${DOPA_CODESIGN_KEYCHAIN}"
+          fi
+
+  update-homebrew:
+    if: ${{ !github.event.release.prerelease }}
+    needs: publish-release-assets
+    runs-on: macos-26
+    concurrency:
+      # Only the tap update is global. Asset jobs for other tags remain
+      # independent, while pending tap jobs may collapse to the newest release.
+      group: dopa-homebrew-tap
+      cancel-in-progress: false
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      RELEASE_SHA: ${{ github.sha }}
+      APP_ARCHIVE: ${{ needs.publish-release-assets.outputs.app-archive }}
+      APP_SHA256: ${{ needs.publish-release-assets.outputs.app-sha256 }}
+      BUNDLE_NAME: ${{ needs.publish-release-assets.outputs.bundle-name }}
+    steps:
+      - name: Require the Homebrew tap token
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${HOMEBREW_TAP_TOKEN}" ]]; then
+            echo "::error::Add a HOMEBREW_TAP_TOKEN secret with Contents and Pull requests write access to gw31415/homebrew-tap."
+            exit 1
+          fi
+
+      - name: Check out the released source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate the release metadata
+        run: |
+          set -euo pipefail
+          [[ "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "${APP_ARCHIVE}" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*\.zip$ ]]
+          [[ "${APP_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${BUNDLE_NAME}" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*\.app$ ]]
+          [[ "$(git rev-parse HEAD)" == "${RELEASE_SHA}" ]]
+          [[ "$(git rev-list -n 1 "${RELEASE_TAG}")" == "${RELEASE_SHA}" ]]
+
+      - name: Install the locked toolchain
+        uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3
+        with:
+          install: true
+          cache: true
+
+      - name: Check out the Homebrew tap
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: gw31415/homebrew-tap
+          ref: main
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare and test the Homebrew Cask update
+        if: ${{ !github.event.release.prerelease }}
+        id: tap-update
+        run: |
+          set -euo pipefail
+          version=${RELEASE_TAG#v}
+          reject_downgrade() {
+            local cask_path=$1
+            local source_name=$2
+            local current_version
+            current_version=$(sed -n 's/^  version "\([0-9][0-9.]*\)"$/\1/p' \
+              "${cask_path}")
+            [[ "${current_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+              echo "::error::Cannot read the Cask version from ${source_name}"
+              exit 1
+            }
+            if ! mise exec -- python -c '
+          import sys
+          current = tuple(map(int, sys.argv[1].split(".")))
+          released = tuple(map(int, sys.argv[2].split(".")))
+          raise SystemExit(current > released)
+          ' "${current_version}" "${version}"; then
+              echo "::error::Refusing to downgrade the Cask from ${current_version} to ${version} (${source_name})"
+              exit 1
+            fi
+          }
+
+          if [[ -f homebrew-tap/Casks/dopa.rb ]]; then
+            reject_downgrade homebrew-tap/Casks/dopa.rb main
+          fi
+          pending_cask="${RUNNER_TEMP}/pending-dopa.rb"
+          if git -C homebrew-tap show \
+            origin/automation/dopa-release:Casks/dopa.rb >"${pending_cask}" 2>/dev/null; then
+            reject_downgrade "${pending_cask}" origin/automation/dopa-release
+          fi
+          ./scripts/render-homebrew-cask.sh \
+            "${version}" "${APP_SHA256}" homebrew-tap/Casks/dopa.rb
+
+          branch=automation/dopa-release
+          if [[ -n "$(git -C homebrew-tap status --porcelain -- Casks/dopa.rb)" ]]; then
+            git -C homebrew-tap config user.name "github-actions[bot]"
+            git -C homebrew-tap config user.email \
+              "41898282+github-actions[bot]@users.noreply.github.com"
+            git -C homebrew-tap switch -C "${branch}"
+            git -C homebrew-tap add Casks/dopa.rb
+            git -C homebrew-tap commit -m "dopa ${version}"
+            echo "changed=true" >>"${GITHUB_OUTPUT}"
+            echo "branch=${branch}" >>"${GITHUB_OUTPUT}"
+          else
+            echo "changed=false" >>"${GITHUB_OUTPUT}"
+          fi
+
+          # Homebrew clones this local repository, so commit the generated Cask
+          # before tapping it. The branch is pushed only after every check passes.
+          brew tap gw31415/tap "${GITHUB_WORKSPACE}/homebrew-tap"
+          (cd homebrew-tap && script/check)
+          brew install --cask gw31415/tap/dopa
+          while IFS= read -r cli; do
+            cli_path=$(command -v "${cli}")
+            test -x "${cli_path}"
+            "${cli_path}" --help >/dev/null
+          done < <(mise exec -- python -c '
+          import json
+          products = json.load(open("release/artifacts.json"))["products"]
+          print("\n".join(product["name"] for product in products if product["classification"] == "cli"))
+          ')
+
+          installed_app="/Applications/${BUNDLE_NAME}"
+          test -d "${installed_app}"
+          app_executable=$(plutil -extract CFBundleExecutable raw -o - \
+            "${installed_app}/Contents/Info.plist")
+          open "${installed_app}"
+          launched=0
+          for _ in {1..20}; do
+            if pgrep -x "${app_executable}" >/dev/null; then
+              launched=1
+              break
+            fi
+            sleep 0.5
+          done
+          [[ "${launched}" == 1 ]] || {
+            echo "::error::Dopa.app did not stay running"
+            exit 1
+          }
+          pkill -TERM -x "${app_executable}"
+          brew uninstall --cask gw31415/tap/dopa
+
+      - name: Push the tap update
+        if: ${{ !github.event.release.prerelease && steps.tap-update.outputs.changed == 'true' }}
+        working-directory: homebrew-tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh auth setup-git
+          git push --force-with-lease --set-upstream origin \
+            "HEAD:refs/heads/${{ steps.tap-update.outputs.branch }}"
+
+      - name: Open or reuse the Homebrew tap pull request
+        if: ${{ !github.event.release.prerelease && steps.tap-update.outputs.changed == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAP_BRANCH: ${{ steps.tap-update.outputs.branch }}
+        run: |
+          set -euo pipefail
+          version=${RELEASE_TAG#v}
+          body=$(cat <<EOF
+          ## Dopa ${version}
+
+          - Official release: https://github.com/gw31415/dopa/releases/tag/${RELEASE_TAG}
+          - macOS verification: the release workflow installed the Cask through the normal Gatekeeper path, launched the Developer ID-signed and notarized app, ran every inventoried CLI help command, and uninstalled the Cask successfully.
+          - The archive checksum is generated from the verified release asset.
+
+          Generated automatically by gw31415/dopa release workflow.
+          EOF
+          )
+          existing_url=$(gh pr list --repo gw31415/homebrew-tap --state open \
+            --head "${TAP_BRANCH}" --json url --jq '.[0].url // empty')
+          if [[ -n "${existing_url}" ]]; then
+            gh pr edit "${existing_url}" --repo gw31415/homebrew-tap \
+              --title "dopa ${version}" --body "${body}"
+            printf 'Updated existing Homebrew pull request: %s\n' "${existing_url}"
+            exit 0
+          fi
+
+          gh pr create --repo gw31415/homebrew-tap \
+            --base main --head "${TAP_BRANCH}" \
+            --title "dopa ${version}" --body "${body}"

@@ -38,7 +38,7 @@ final class FilePower: Power {
     try write("power", disabled ? "1" : "0")
   }
 }
-final class FileControls: Controls {
+final class FileControls: DisplayControls {
   let directory: URL
   init(_ directory: URL) { self.directory = directory }
   func keepDisplayOn() throws {
@@ -51,21 +51,14 @@ final class FileControls: Controls {
         to: directory.appendingPathComponent("display"), atomically: true, encoding: .utf8)
     }
   }
-  func lidClosed() throws -> Bool {
-    switch try String(contentsOf: directory.appendingPathComponent("lid"), encoding: .utf8) {
-    case "0": return false
-    case "1": return true
-    default: throw DopaError("injected lid failure")
-    }
-  }
 }
 
 do {
   let env = ProcessInfo.processInfo.environment
   if CommandLine.arguments.contains("--native-probe") {
     let power = NativePower()
-    let controls = NativeControls()
-    print("SleepDisabled=\(try power.readDisabled()), lidClosed=\(try controls.lidClosed())")
+    let controls = NativeDisplayControls()
+    print("SleepDisabled=\(try power.readDisabled())")
     try controls.keepDisplayOn()
     print("display assertion active; pid=\(getpid())")
     fflush(stdout)
@@ -94,8 +87,7 @@ do {
         path: directory.appendingPathComponent("state").path,
         power: FilePower(directory), controls: FileControls(directory))
     } else {
-      let options = Options(
-        keepDisplayOn: env["DOPA_TEST_DISPLAY"] == "1", stopOnLidClose: env["DOPA_TEST_LID"] == "1")
+      let options = Options(keepDisplayOn: env["DOPA_TEST_DISPLAY"] == "1")
       var childEnv = env
       childEnv["DOPA_TEST_CHILD"] = "1"
       try Runtime.frontend(

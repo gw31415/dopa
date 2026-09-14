@@ -17,9 +17,9 @@ Scenarios:
   the mock power source, so event/broadcast load is covered by protocol tests,
   not claimed by this scenario.
 - `owner`: one subscribed client holding a session with
-  `stopOnLidClose=true`. Covers the ~0.3s lid check scheduling and session
-  steady state. The fixture lid remains open, so this measures the check
-  path without intentionally releasing the session.
+  `keepDisplayOn=true`. Covers system and display sleep prevention and session
+  steady state. The fixture power source remains stable, so this does not
+  intentionally release the session.
 
 Metrics (all from `ps`/`lsof`, no root needed):
 
@@ -58,48 +58,6 @@ Disconnect/close detection, deadline expiry, and uninstall reflection are not
 measured by this sampler. Use the dedicated automated tests and the manual
 acceptance procedure in `docs/acceptance.md`; record those results separately.
 
-## Historical reference (previous driver)
-
-2026-09-13, `Darwin 25.6.0 arm64`, MacOSX26.5 SDK, Swift 6.3.3,
-release `DopaTestHarness`, `--duration 60 --warmup 5`, 3 repetitions each,
-using the driver that predated the current script. These values are retained
-as evidence of the earlier run, not as an acceptance baseline for the current
-driver: setup frames were excluded from IPC counters and the owner scenario
-used `stopOnLidClose=false`.
-Per-run summaries were generated in temporary directories and are not kept as
-durable repository artifacts.
-
-| scenario | cpu/sec (rep1/2/3) | sampled rss max KiB (rep1/2/3) | sampled fds max | stop latency | old IPC counter |
-| --- | --- | --- | --- | --- | --- |
-| idle | 0.0000 / 0.0000 / 0.0000 | 8480 / 8480 / 8480 | 14 | 0.01s graceful ×3 | n/a |
-| monitor | 0.0003 / 0.0003 / 0.0003 | 8624 / 8592 / 8576 | 15 | 0.01s graceful ×3 | 0 bytes / 0 frames ×3 |
-| owner | 0.0003 / 0.0003 / 0.0003 | 8656 / 8640 / 8640 | 15 | 0.01s graceful ×3 | 0 bytes / 0 frames ×3 |
-
-The historical readings show that an idle daemon consumed no measurable CPU
-time over 60s; a connected
-or session-holding daemon consumes ~0.02s per 60s (~0.0003/s, at `ps`
-resolution floor). RSS holds steady at ~8.5MB release. Every stop is graceful
-in 0.01s, including from the infinite poll, which exercises the stop
-self-pipe. The old zero counters cannot establish the current driver's setup
-or event accounting.
-
-## Historical multi-client runs (same machine/SDK/harness family)
-
-| scenario | cpu/sec | sampled rss max/avg (KiB) | sampled fds max/last | stop | old IPC counter |
-| --- | --- | --- | --- | --- | --- |
-| monitor ×8, 60s | 0.0003 | 8752/8739 | 22/14 | 0.01s graceful | 8 clients, 0 bytes / 0 frames |
-| owner ×8, 60s | 0.0005 | 8992/8973 | 22/14 | 0.01s graceful | 8 clients, 44005 bytes / 26 frames |
-| idle, 60s, post event-driven client build | 0.0000 | 8480/8438 | 14/14 | 0.01s graceful | n/a |
-| monitor, 60s, post event-driven client build | 0.0003 | 8608/8582 | 15/14 | 0.01s graceful | 1 client, 0 bytes / 0 frames |
-
-These are also historical runs with the previous driver; the owner row did not
-enable the current `stopOnLidClose=true` measurement. They are retained for
-context only and do not establish the current driver's IPC accounting.
-Eight concurrent subscribers/sessions added no measurable CPU over one
-(~0.0005/s at floor) and FDs scale as expected (22 = listener + 8 clients +
-files). The event-driven client comparison remains a historical observation; it does not
-replace a fresh run with the current driver.
-
 ## Smoke runs (harness validation, not baselines)
 
 The current script should be exercised with a short run after each harness or
@@ -123,4 +81,4 @@ These readings only validate the current harness and driver lifecycle. The
 zero CPU values are below `ps` resolution and do not establish a reduction.
 Record the command, environment, and generated `summary.txt` alongside any
 new smoke table. Adoption-grade 60s×3 baselines per scenario remain open until
-they are rerun with the current script and `stopOnLidClose=true` owner path.
+they are rerun with the current script.

@@ -15,21 +15,31 @@ let package = Package(
     .target(
       name: "CDopa",
       linkerSettings: [.linkedFramework("IOKit"), .linkedFramework("CoreFoundation")]),
+    .target(
+      name: "DopaLid",
+      linkerSettings: [.linkedFramework("IOKit"), .linkedFramework("CoreFoundation")]),
     .target(name: "DopaProtocol"),
     .target(name: "DopaClient", dependencies: ["DopaProtocol"]),
     .target(name: "DopaAuthorization", linkerSettings: [.linkedFramework("Security")]),
     .target(name: "DopaCore", dependencies: ["CDopa", "DopaProtocol", "DopaAuthorization"]),
-    .target(name: "DopaUIModel", dependencies: ["DopaClient", "DopaProtocol", "DopaAuthorization"]),
-    .executableTarget(name: "DopaUI", dependencies: ["DopaUIModel", "CDopa"]),
+    .target(
+      name: "DopaUIModel",
+      dependencies: ["DopaClient", "DopaLid", "DopaProtocol", "DopaAuthorization"]),
+    .executableTarget(name: "DopaUI", dependencies: ["DopaUIModel", "DopaLid", "CDopa"]),
     .target(name: "DopaManagement", dependencies: ["DopaClient", "DopaProtocol"]),
-    .executableTarget(name: "DopaCLI", dependencies: ["DopaClient", "DopaProtocol"]),
+    .executableTarget(name: "DopaCLI", dependencies: ["DopaClient", "DopaLid", "DopaProtocol"]),
     .executableTarget(name: "DopaDaemonCLI", dependencies: ["DopaCore", "DopaManagement", "DopaClient", "DopaProtocol"]),
     .executableTarget(
       name: "DopaTestHarness", dependencies: ["DopaCore", "DopaClient", "DopaProtocol"], path: "Tests/DopaTestHarness"),
-    .testTarget(name: "DopaCoreTests", dependencies: ["DopaCore", "DopaTestHarness", "DopaClient", "DopaProtocol"]),
+    .testTarget(
+      name: "DopaCoreTests",
+      dependencies: ["DopaCore", "DopaTestHarness", "DopaClient", "DopaProtocol"]),
+    .testTarget(name: "DopaLidTests", dependencies: ["DopaLid"]),
     .testTarget(name: "DopaProtocolTests", dependencies: ["DopaProtocol"]),
     .testTarget(name: "DopaClientTests", dependencies: ["DopaClient", "DopaProtocol"]),
-    .testTarget(name: "DopaUIModelTests", dependencies: ["DopaUIModel", "DopaProtocol", "DopaAuthorization"]),
+    .testTarget(
+      name: "DopaUIModelTests",
+      dependencies: ["DopaUIModel", "DopaLid", "DopaProtocol", "DopaAuthorization"]),
     .testTarget(name: "DopaUITests", dependencies: ["DopaUI", "DopaUIModel", "DopaProtocol"]),
     .testTarget(name: "DopaAuthorizationTests", dependencies: ["DopaAuthorization"]),
     .testTarget(name: "DopaManagementTests", dependencies: ["DopaManagement", "DopaProtocol"]),

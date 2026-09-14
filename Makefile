@@ -26,7 +26,7 @@ APP_RESOURCES := \
 	Resources/Dopa.icon/icon.json \
 	$(wildcard Resources/Dopa.icon/Assets/*.svg)
 
-.PHONY: build app test check FORCE
+.PHONY: build app test release-check check FORCE
 
 FORCE:
 
@@ -36,7 +36,21 @@ app: .build/.make/app
 
 test: .build/.make/test
 
-check: test build
+release-check: \
+	Package.swift \
+	Resources/Dopa-Info.plist \
+	release/artifacts.json \
+	scripts/package-release.sh \
+	scripts/package_release.py \
+	scripts/render-homebrew-cask.sh \
+	scripts/render_homebrew_cask.py \
+	scripts/verify_published_release.py
+	./scripts/package-release.sh --check
+	@version="$$(plutil -extract CFBundleShortVersionString raw -o - Resources/Dopa-Info.plist)"; \
+	./scripts/render-homebrew-cask.sh "$$version" \
+		0000000000000000000000000000000000000000000000000000000000000000 >/dev/null
+
+check: release-check test build
 
 .build/.make/dopa: $(BUILD_CONFIG) $(CLI_SOURCES) FORCE
 	@if test -x .build/release/dopa \

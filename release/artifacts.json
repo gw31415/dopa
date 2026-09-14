@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "bundleName": "Dopa.app",
+  "appArchive": "Dopa-macos-arm64.zip",
+  "cliArchive": "dopa-macos-arm64.tar.gz",
+  "products": [
+    {
+      "name": "dopa",
+      "classification": "cli",
+      "bundlePath": "Contents/Helpers/dopa",
+      "archivePath": "dopa"
+    },
+    {
+      "name": "dopa-daemon",
+      "classification": "cli",
+      "bundlePath": "Contents/Helpers/dopa-daemon",
+      "archivePath": "dopa-daemon"
+    },
+    {
+      "name": "dopa-ui",
+      "classification": "app",
+      "bundlePath": "Contents/MacOS/dopa-ui"
+    }
+  ],
+  "cliArchiveFiles": [
+    {
+      "source": "README.md",
+      "archivePath": "README.md"
+    },
+    {
+      "source": "DESIGN.md",
+      "archivePath": "DESIGN.md"
+    },
+    {
+      "source": "docs/acceptance.md",
+      "archivePath": "docs/acceptance.md"
+    },
+    {
+      "source": "completions/dopa.bash",
+      "archivePath": "completions/dopa.bash"
+    },
+    {
+      "source": "completions/dopa.fish",
+      "archivePath": "completions/dopa.fish"
+    },
+    {
+      "source": "completions/dopa.zsh",
+      "archivePath": "completions/dopa.zsh"
+    },
+    {
+      "source": "completions/dopa-daemon.bash",
+      "archivePath": "completions/dopa-daemon.bash"
+    },
+    {
+      "source": "completions/dopa-daemon.fish",
+      "archivePath": "completions/dopa-daemon.fish"
+    },
+    {
+      "source": "completions/dopa-daemon.zsh",
+      "archivePath": "completions/dopa-daemon.zsh"
+    }
+  ]
+}

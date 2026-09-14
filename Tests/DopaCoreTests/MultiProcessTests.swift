@@ -27,12 +27,11 @@ final class MultiProcessTests: XCTestCase {
       "dopa-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
     try write(directory, "power", "0")
-    try write(directory, "lid", "0")
     return directory
   }
 
   private func spawn(
-    _ directory: URL, name: String, display: Bool = false, lid: Bool = false
+    _ directory: URL, name: String, display: Bool = false
   ) throws -> Client {
     let stderr = directory.appendingPathComponent("stderr-\(name)")
     FileManager.default.createFile(atPath: stderr.path, contents: nil)
@@ -41,7 +40,6 @@ final class MultiProcessTests: XCTestCase {
     process.environment = [
       "DOPA_TEST_DIRECTORY": directory.path,
       "DOPA_TEST_DISPLAY": display ? "1" : "0",
-      "DOPA_TEST_LID": lid ? "1" : "0",
     ]
     process.standardOutput = FileHandle.nullDevice
     process.standardError = try FileHandle(forWritingTo: stderr)
@@ -184,7 +182,7 @@ final class MultiProcessTests: XCTestCase {
     XCTAssertEqual(value(directory, "power"), "0")
   }
 
-  func testDisplayAndLidOptionsArePerClient() throws {
+  func testDisplayOptionIsPerClient() throws {
     let directory = try makeDirectory()
     var clients: [Client] = []
     defer { cleanup(clients, directory: directory) }
@@ -202,20 +200,6 @@ final class MultiProcessTests: XCTestCase {
     XCTAssertEqual(value(directory, "display"), "0")
     XCTAssertEqual(value(directory, "power"), "1")
     try terminate(follower, with: SIGTERM)
-    XCTAssertEqual(value(directory, "power"), "0")
-
-    let watched = try spawn(directory, name: "watched", lid: true)
-    clients.append(watched)
-    let unwatched = try spawn(directory, name: "unwatched")
-    clients.append(unwatched)
-    try waitFor(directory, "power", "1", clients: clients)
-    try waitForText(watched, "sleep disabled;")
-    try waitForText(unwatched, "sleep disabled;")
-    try write(directory, "lid", "1")
-    try waitForExit(watched)
-    XCTAssertTrue(unwatched.process.isRunning)
-    XCTAssertEqual(value(directory, "power"), "1")
-    try terminate(unwatched, with: SIGTERM)
     XCTAssertEqual(value(directory, "power"), "0")
   }
 

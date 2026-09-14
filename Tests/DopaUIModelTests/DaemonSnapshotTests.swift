@@ -87,6 +87,14 @@ final class DaemonSnapshotTests: XCTestCase {
     XCTAssertThrowsError(try DaemonSnapshot(snapshotJSON(
       phase: "active", sessions: [first, first], systemSleepDisabled: true)))
   }
+
+  func testSessionOptionsRejectFieldsOutsideTheV1Schema() throws {
+    var session = sessionJSON(id: "a", clientName: "CLI", pid: 1).objectValue!
+    session["options"] = .object([
+      "keepDisplayOn": .bool(false), "clientPolicy": .string("local"),
+    ])
+    XCTAssertThrowsError(try DaemonSnapshot(snapshotJSON(sessions: [.object(session)])))
+  }
 }
 
 private func snapshotJSON(
@@ -119,17 +127,13 @@ private func sessionJSON(
   id: String,
   clientName: String,
   pid: Int32,
-  keepDisplayOn: Bool = false,
-  stopOnLidClose: Bool = false
+  keepDisplayOn: Bool = false
 ) -> JSONValue {
   .object([
     "id": .string(id),
     "clientName": .string(clientName),
     "peerPID": .number(Double(pid)),
-    "options": .object([
-      "keepDisplayOn": .bool(keepDisplayOn),
-      "stopOnLidClose": .bool(stopOnLidClose),
-    ]),
+    "options": .object(["keepDisplayOn": .bool(keepDisplayOn)]),
   ])
 }
 

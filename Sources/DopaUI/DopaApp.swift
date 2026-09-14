@@ -1,4 +1,5 @@
 import AppKit
+import DopaLid
 import DopaUIModel
 import Observation
 import SwiftUI
@@ -26,11 +27,16 @@ struct DopaApp: App {
     #if DOPA_UI_TESTING
     // Compiled only into the separate fixture bundle. Production cannot select an untrusted socket.
     let arguments = CommandLine.arguments
-    guard let index = arguments.firstIndex(of: "--test-socket"), arguments.indices.contains(index + 1) else {
-      fatalError("The UI fixture requires --test-socket pointing to a mock-power daemon")
+    guard let socketIndex = arguments.firstIndex(of: "--test-socket"),
+      arguments.indices.contains(socketIndex + 1),
+      let lidIndex = arguments.firstIndex(of: "--test-lid"),
+      arguments.indices.contains(lidIndex + 1)
+    else {
+      fatalError("The UI fixture requires --test-socket and --test-lid")
     }
     let model = AppModel(
-      transport: SocketTransport(path: arguments[index + 1], requireRoot: false),
+      transport: SocketTransport(path: arguments[socketIndex + 1], requireRoot: false),
+      lidState: FixtureLidState(path: arguments[lidIndex + 1]),
       authorize: { ManagementCredential(externalForm: Data(repeating: 0xAB, count: 32).base64EncodedString()) })
     #else
     let model = AppModel()
@@ -47,6 +53,24 @@ struct DopaApp: App {
       .defaultLaunchBehavior(.suppressed)
   }
 }
+
+#if DOPA_UI_TESTING
+private final class FixtureLidState: LidStateReading, @unchecked Sendable {
+  private let path: String
+
+  init(path: String) {
+    self.path = path
+  }
+
+  func isClosed() throws -> Bool {
+    switch try String(contentsOfFile: path, encoding: .utf8) {
+    case "0": return false
+    case "1": return true
+    default: throw CocoaError(.fileReadCorruptFile)
+    }
+  }
+}
+#endif
 
 @available(macOS 26.0, *)
 @MainActor

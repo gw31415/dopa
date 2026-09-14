@@ -845,7 +845,7 @@ final class ManagementTests: XCTestCase {
         .object([
           "id": .string("session-1"), "clientName": .string("editor"),
           "peerUID": .number(501), "peerPID": .number(42),
-          "options": .object(["keepDisplayOn": .bool(false), "stopOnLidClose": .bool(true)]),
+          "options": .object(["keepDisplayOn": .bool(false)]),
         ])
       ]),
       "recoveryPending": .bool(false), "lastError": .null,
@@ -855,7 +855,7 @@ final class ManagementTests: XCTestCase {
     XCTAssertTrue(output.contains("client=editor"))
     XCTAssertTrue(output.contains("uid=501"))
     XCTAssertTrue(output.contains("pid=42"))
-    XCTAssertTrue(output.contains("lid-close=on"))
+    XCTAssertTrue(output.contains("display=off"))
     XCTAssertEqual(try JSONWire.decode(Data((try DaemonStatusFormatter.json(snapshot)).utf8)), snapshot)
   }
 }

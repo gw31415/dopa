@@ -16,19 +16,13 @@ final class DaemonServiceTests: XCTestCase {
       disabled = value
     }
   }
-  final class FakeControls: Controls {
+  final class FakeControls: DisplayControls {
     var display = false
-    var lid = false
     var failRelease = false
-    var failLidNext = false
     func keepDisplayOn() throws { display = true }
     func releaseDisplay() throws {
       if failRelease { throw DopaError("display release failure") }
       display = false
-    }
-    func lidClosed() throws -> Bool {
-      if failLidNext { failLidNext = false; throw DopaError("lid probe failure") }
-      return lid
     }
   }
   func withEngine(
@@ -60,11 +54,11 @@ final class DaemonServiceTests: XCTestCase {
       peer: peer)
   }
   func acquire(
-    _ engine: DaemonEngine, _ peer: ServicePeer, display: Bool = false, lid: Bool = false
+    _ engine: DaemonEngine, _ peer: ServicePeer, display: Bool = false
   ) -> JSONValue {
     call(
       engine, peer, "session.acquire",
-      .object(["options": .object(["keepDisplayOn": .bool(display), "stopOnLidClose": .bool(lid)])])
+      .object(["options": .object(["keepDisplayOn": .bool(display)])])
     )
   }
   func testOwnershipAggregationAndObserver() throws {
@@ -115,17 +109,12 @@ final class DaemonServiceTests: XCTestCase {
       XCTAssertTrue(engine.phase == "degraded")
     }
   }
-  func testLidEndsOnlyOptedInSessionAndShutdownDrains() throws {
-    try withEngine { engine, power, controls in
+  func testPrepareShutdownRequiresRootAndDrains() throws {
+    try withEngine { engine, power, _ in
       let one = peer()
       let two = peer()
-      _ = acquire(engine, one, lid: true)
       _ = acquire(engine, two)
-      controls.lid = true
-      engine.checkLid()
-      XCTAssertTrue(engine.sessions.count == 1)
       XCTAssertTrue(power.disabled)
-      XCTAssertTrue(engine.takeEvents().first?.1["data"]?["reason"] == .string("lid_closed"))
       XCTAssertTrue(
         call(engine, two, "admin.prepareShutdown")["error"]?["code"] == .string("permission_denied")
       )
@@ -134,33 +123,14 @@ final class DaemonServiceTests: XCTestCase {
       XCTAssertTrue(acquire(engine, one)["error"]?["code"] == .string("shutting_down"))
     }
   }
-  func testConflictAndClosedLidDoNotMutate() throws {
-    try withEngine { engine, power, controls in
+  func testPowerConflictDoesNotMutate() throws {
+    try withEngine { engine, power, _ in
       let one = peer()
-      controls.lid = true
-      XCTAssertTrue(acquire(engine, one, lid: true)["error"]?["code"] == .string("lid_closed"))
       power.disabled = true
       XCTAssertTrue(acquire(engine, one)["error"]?["code"] == .string("power_conflict"))
       XCTAssertTrue(engine.sessions.isEmpty)
       XCTAssertTrue(try !engine.state.pending())
       XCTAssertTrue(power.disabled)
-    }
-  }
-  func testLidProbeFailureIsFailClosed() throws {
-    try withEngine { engine, _, controls in
-      let one = peer()
-      // First probe fails: acquire must report lid_unavailable, not success.
-      controls.failLidNext = true
-      XCTAssertEqual(acquire(engine, one, lid: true)["error"]?["code"], .string("lid_unavailable"))
-      XCTAssertTrue(engine.sessions.isEmpty)
-      // Next probe succeeds (lid open): acquire proceeds.
-      XCTAssertNotNil(acquire(engine, one, lid: true)["result"]?["sessionId"])
-      // Active session with a failing probe ends with lid_error.
-      controls.failLidNext = true
-      engine.checkLid()
-      XCTAssertTrue(engine.sessions.isEmpty)
-      XCTAssertEqual(
-        engine.takeEvents().first?.1["data"]?["reason"], .string("lid_error"))
     }
   }
   func testUpdateCannotAcquireWithInvalidSessionID() throws {
@@ -170,7 +140,7 @@ final class DaemonServiceTests: XCTestCase {
         engine, one, "session.update",
         .object([
           "sessionId": .null,
-          "options": .object(["keepDisplayOn": .bool(false), "stopOnLidClose": .bool(false)]),
+          "options": .object(["keepDisplayOn": .bool(false)]),
         ]))
       XCTAssertEqual(response["error"]?["code"], .string("invalid_params"))
       XCTAssertTrue(engine.sessions.isEmpty)
@@ -257,48 +227,34 @@ final class DaemonServiceTests: XCTestCase {
   }
   func testPollTimeoutComputation() {
     // The run loop sleeps until the earliest timer deadline, socket
-    // activity, or stop-pipe wakeup. No peers and no lid sessions means no
-    // deadlines at all (infinite wait); every deadline class shortens it.
+    // activity, or stop-pipe wakeup. No peers means no deadlines at all
+    // (infinite wait); every deadline class shortens it.
     let now = Date()
     XCTAssertEqual(
       DaemonService.pollTimeoutMilliseconds(
-        now: now, nextLid: now, nextCheck: now, peers: [:], hasLidSessions: false), -1)
+        now: now, nextCheck: now, peers: [:]), -1)
     let active = peer()
     let connected = [active.fd.value: active]
     let power = DaemonService.pollTimeoutMilliseconds(
-      now: now, nextLid: now, nextCheck: now.addingTimeInterval(1),
-      peers: connected, hasLidSessions: false)
+      now: now, nextCheck: now.addingTimeInterval(1), peers: connected)
     XCTAssertGreaterThan(power, 0)
     XCTAssertLessThanOrEqual(power, 1000)
-    let lid = DaemonService.pollTimeoutMilliseconds(
-      now: now, nextLid: now.addingTimeInterval(0.3), nextCheck: now.addingTimeInterval(3600),
-      peers: connected, hasLidSessions: true)
-    XCTAssertGreaterThan(lid, 0)
-    XCTAssertLessThanOrEqual(lid, 300)
     let fresh = peer()
     fresh.hello = false
     let hello = DaemonService.pollTimeoutMilliseconds(
-      now: now, nextLid: now.addingTimeInterval(3600), nextCheck: now.addingTimeInterval(3600),
-      peers: [fresh.fd.value: fresh], hasLidSessions: false)
+      now: now, nextCheck: now.addingTimeInterval(3600), peers: [fresh.fd.value: fresh])
     XCTAssertGreaterThan(hello, 4000)
     // `fresh` is created just after `now`, and positive values round upward.
     XCTAssertLessThanOrEqual(hello, 5001)
     let partial = peer()
     partial.partialSince = now.addingTimeInterval(-2)
     let frame = DaemonService.pollTimeoutMilliseconds(
-      now: now, nextLid: now.addingTimeInterval(3600), nextCheck: now.addingTimeInterval(3600),
-      peers: [partial.fd.value: partial], hasLidSessions: false)
+      now: now, nextCheck: now.addingTimeInterval(3600), peers: [partial.fd.value: partial])
     XCTAssertGreaterThan(frame, 0)
     XCTAssertLessThanOrEqual(frame, 3000)
     XCTAssertEqual(
       DaemonService.pollTimeoutMilliseconds(
-        now: now, nextLid: now.addingTimeInterval(-1), nextCheck: now.addingTimeInterval(3600),
-        peers: connected, hasLidSessions: true), 0)
-    XCTAssertEqual(
-      DaemonService.pollTimeoutMilliseconds(
-        now: now, nextLid: now.addingTimeInterval(3600),
-        nextCheck: now.addingTimeInterval(0.000_1), peers: connected,
-        hasLidSessions: false),
+        now: now, nextCheck: now.addingTimeInterval(0.000_1), peers: connected),
       1)
   }
   func testStopPipeReadEndIsNonblockingAndCloseOnExec() {
@@ -543,7 +499,7 @@ final class DaemonServiceTests: XCTestCase {
           engine, two, "session.acquire",
           .object([
             "options": .object([
-              "keepDisplayOn": .bool(false), "stopOnLidClose": .bool(false), "typo": .bool(true),
+              "keepDisplayOn": .bool(false), "unexpectedPolicy": .bool(true),
             ])
           ]))["error"]?["code"], .string("invalid_params"))
       XCTAssertFalse(power.disabled)

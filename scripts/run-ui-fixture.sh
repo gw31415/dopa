@@ -98,7 +98,7 @@ done
 APP_BIN="${BUILD_ROOT}/Dopa-Test.app/Contents/MacOS/dopa-ui"
 [[ -x "${APP_BIN}" ]] || die "missing ${APP_BIN}"
 printf 'Launching the UI fixture…\n'
-"${APP_BIN}" --test-socket "${SOCKET_PATH}" &
+"${APP_BIN}" --test-socket "${SOCKET_PATH}" --test-lid "${FIXTURE_DIR}/lid" &
 UI_PID=$!
 
 wait "${UI_PID}"

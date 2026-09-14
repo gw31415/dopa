@@ -385,7 +385,7 @@ private struct SessionsView: View {
                 .lineLimit(1).truncationMode(.middle)
               Text(session.id == model.ownSessionID ? "このアプリ" : "PID \(String(session.peerPID))")
                 .font(.caption).foregroundStyle(.secondary)
-              Text("ディスプレイオフ防止 \(session.options.keepDisplayOn ? "オン" : "オフ") · ふたを閉じたら停止 \(session.options.stopOnLidClose ? "オン" : "オフ")")
+              Text("ディスプレイオフ防止 \(session.options.keepDisplayOn ? "オン" : "オフ")")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)

@@ -5,11 +5,10 @@
 ## 準備・導入
 
 1. `make check` を実行し、全テストと両方の release build が成功することを確認します。
-2. 旧版の `sudo dopa` と、他のスリープ防止ツールを終了します。`pmset -g` で SleepDisabled が 0 であることを確認します。
+2. `sudo dopa` と、他のスリープ防止ツールを終了します。`pmset -g` で SleepDisabled が 0 であることを確認します。
 3. 一般ユーザーから `sudo .build/release/dopa-daemon install` を実行します。実行元が分からない場合は `--user USER` を指定します。
 4. `launchctl print system/dev.amas.dopa.daemon` でサービスの登録を確認します。`dopa-daemon status` と `status --json` は sudo なしで成功し、セッションなし・idle・確認値 false であることを確認します。
 5. 配置した実行ファイル・plist は root 所有で一般ユーザーが変更できず、`/var/db/dopa` は 0700 であることを確認します。別ユーザーからはソケット API を操作できないことを確認します。
-6. 旧版の `dev.dopa.daemon` を導入した状態から新版のinstallを実行し、旧サービスと旧管理ファイルが削除され、許可ユーザーを維持した `dev.amas.dopa.daemon` だけが稼働することを確認します。
 
 ## セッション
 
@@ -22,7 +21,7 @@
 
 ## 障害・管理
 
-1. dopa 稼働中にデーモンへ SIGKILL を送ります。launchd が再起動し、記録が復旧することを確認します。旧 CLI は異常終了し、セッションを自動的に再取得しないため、復旧後はセッションなしとなります。
+1. dopa 稼働中にデーモンへ SIGKILL を送ります。launchd が再起動し、記録が復旧することを確認します。CLI は異常終了し、セッションを自動的に再取得しないため、復旧後はセッションなしとなります。
 2. 再起動後に status と新しい dopa が利用できることを確認します。
 3. セッション稼働中に `sudo dopa-daemon install` を再実行し、既存セッションの終了・復元・更新後の稼働を確認します。
 4. `sudo dopa-daemon uninstall` を実行し、復元後にサービスと管理ファイルが削除され、CLI 自体は残ることを確認します。status は接続不能で非ゼロ終了します。

@@ -1,6 +1,7 @@
 import Darwin
 import Dispatch
 import DopaClient
+import DopaLid
 import DopaProtocol
 import Foundation
 
@@ -155,13 +156,23 @@ private func receiveSessionEvent(
     throw CLIError("dopa-daemon ended the session without confirming cleanup", status: 1)
   }
   let reason = event["data"]?["reason"]?.stringValue ?? "unknown"
-  if reason == "lid_closed" || reason == "daemon_shutdown" || reason == "user_stopped" {
+  if reason == "daemon_shutdown" || reason == "user_stopped" {
     return true
   }
   throw CLIError("dopa-daemon ended the session (\(reason))", status: 1)
 }
 
-private func runSession(_ options: Options) throws {
+private func runSession(
+  _ options: Options, lidState: any LidStateReading = NativeLidState()
+) throws {
+  if options.stopOnLidClose {
+    do {
+      if try lidState.isClosed() { return }
+    } catch {
+      throw CLIError("cannot read lid state: \(error)", status: 1)
+    }
+  }
+
   // Signal pipe: lets the loop below wait on the daemon socket and stop
   // notifications together instead of polling on a fixed cadence. Both ends
   // are close-on-exec; the read end is non-blocking so draining never stalls.
@@ -209,8 +220,7 @@ private func runSession(_ options: Options) throws {
       method: "session.acquire",
       params: .object([
         "options": .object([
-          "keepDisplayOn": .bool(options.keepDisplayOn),
-          "stopOnLidClose": .bool(options.stopOnLidClose),
+          "keepDisplayOn": .bool(options.keepDisplayOn)
         ])
       ]),
       timeout: 10)
@@ -223,6 +233,7 @@ private func runSession(_ options: Options) throws {
 
   writeError("sleep inhibition active; press Ctrl+C to release")
   var pipeByte: UInt8 = 0
+  var nextLidCheck = DispatchTime.now().uptimeNanoseconds + 300_000_000
   do {
     while true {
       if signalState.requested {
@@ -232,6 +243,34 @@ private func runSession(_ options: Options) throws {
         } catch {
           throw CLIError("could not confirm session release: \(error)", status: 1)
         }
+      }
+
+      if options.stopOnLidClose,
+        DispatchTime.now().uptimeNanoseconds >= nextLidCheck
+      {
+        do {
+          if try lidState.isClosed() {
+            do {
+              try release(connection: connection, sessionID: sessionID)
+              return
+            } catch {
+              throw CLIError("could not confirm session release after the lid closed: \(error)", status: 1)
+            }
+          }
+        } catch let error as CLIError {
+          throw error
+        } catch {
+          let lidError = error
+          do {
+            try release(connection: connection, sessionID: sessionID)
+          } catch {
+            throw CLIError(
+              "cannot read lid state (\(lidError)); could not confirm session release: \(error)",
+              status: 1)
+          }
+          throw CLIError("cannot read lid state; session released: \(lidError)", status: 1)
+        }
+        nextLidCheck = DispatchTime.now().uptimeNanoseconds + 300_000_000
       }
 
       // A request can decode its response and a following event from one
@@ -250,12 +289,21 @@ private func runSession(_ options: Options) throws {
         Darwin.pollfd(fd: connection.socketDescriptor, events: Int16(POLLIN), revents: 0),
         Darwin.pollfd(fd: pipeFDs[0], events: Int16(POLLIN), revents: 0),
       ]
-      let ready = Darwin.poll(&items, nfds_t(items.count), -1)
+      let timeout: Int32
+      if options.stopOnLidClose {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let remaining = nextLidCheck > now ? nextLidCheck - now : 0
+        timeout = Int32(min((remaining + 999_999) / 1_000_000, UInt64(Int32.max)))
+      } else {
+        timeout = -1
+      }
+      let ready = Darwin.poll(&items, nfds_t(items.count), timeout)
       if ready < 0 {
         if errno == EINTR { continue }
         throw CLIError(
           "dopa-daemon connection failed: \(String(cString: strerror(errno)))", status: 1)
       }
+      if ready == 0 { continue }
       if items[1].revents & Int16(POLLIN) != 0 {
         while Darwin.read(pipeFDs[0], &pipeByte, 1) > 0 {}
         continue

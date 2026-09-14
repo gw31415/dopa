@@ -179,7 +179,6 @@ trap cleanup EXIT
 
 mkdir -p "${STATE_DIR}/ipc"
 printf '0' > "${STATE_DIR}/power"
-printf '0' > "${STATE_DIR}/lid"
 rm -f "${CLIENT_STOP}"
 rm -f "${OUT}"/ipc-counters-*.txt "${OUT}"/client-*.ready \
   "${OUT}"/client-*.stdout.log "${OUT}"/client-*.stderr.log
@@ -304,7 +303,7 @@ def request(method, params):
 request("hello", {"apiVersion": 1, "client": {"name": name, "version": "0"}})
 request("status.subscribe", {})
 if scenario == "owner":
-    request("session.acquire", {"options": {"keepDisplayOn": False, "stopOnLidClose": True}})
+    request("session.acquire", {"options": {"keepDisplayOn": True}})
 
 # The parent waits for this marker before starting warm-up. The connection is
 # therefore established for both warm-up and the complete measured interval.

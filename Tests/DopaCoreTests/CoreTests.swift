@@ -6,29 +6,18 @@ final class CoreTests: XCTestCase {
   func testOptionDefaultsAndForwarding() throws {
     XCTAssertEqual(try Options.parse([]), .run(Options()))
     for display in [false, true] {
-      for lid in [false, true] {
-        let options = Options(keepDisplayOn: display, stopOnLidClose: lid)
-        XCTAssertEqual(try Options.parse(options.arguments), .run(options))
-      }
+      let options = Options(keepDisplayOn: display)
+      XCTAssertEqual(try Options.parse(options.arguments), .run(options))
     }
     XCTAssertEqual(
-      try Options.parse(["-d", "-l"]),
-      .run(Options(keepDisplayOn: true, stopOnLidClose: true)))
+      try Options.parse(["-d"]),
+      .run(Options(keepDisplayOn: true)))
     XCTAssertEqual(
-      try Options.parse(["-dl"]),
-      .run(Options(keepDisplayOn: true, stopOnLidClose: true)))
-    XCTAssertEqual(
-      try Options.parse(["-ld"]),
-      .run(Options(keepDisplayOn: true, stopOnLidClose: true)))
-    XCTAssertEqual(
-      try Options.parse(["-d", "--stop-on-lid-close"]),
-      .run(Options(keepDisplayOn: true, stopOnLidClose: true)))
-    XCTAssertEqual(
-      try Options.parse(["--keep-display-on", "-l"]),
-      .run(Options(keepDisplayOn: true, stopOnLidClose: true)))
+      try Options.parse(["--keep-display-on"]),
+      .run(Options(keepDisplayOn: true)))
     XCTAssertEqual(try Options.parse(["-h"]), .help)
     XCTAssertEqual(try Options.parse(["--help"]), .help)
-    for args in [["-dx"], ["-xd"], ["-lhx"], ["--unknown"]] {
+    for args in [["-dx"], ["-xd"], ["-dhx"], ["--unknown"]] {
       XCTAssertThrowsError(try Options.parse(args))
     }
   }

@@ -74,7 +74,6 @@ final class APIProcessTests: XCTestCase {
       if existing == nil {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         try "0".write(to: directory.appendingPathComponent("power"), atomically: true, encoding: .utf8)
-        try "0".write(to: directory.appendingPathComponent("lid"), atomically: true, encoding: .utf8)
       }
       let errors = directory.appendingPathComponent("daemon-errors")
       FileManager.default.createFile(atPath: errors.path, contents: nil)
@@ -128,9 +127,9 @@ final class APIProcessTests: XCTestCase {
     deinit { stop(); try? errorOutput.close() }
   }
 
-  private func acquire(_ connection: DopaConnection, display: Bool = false, lid: Bool = false) throws -> String {
+  private func acquire(_ connection: DopaConnection, display: Bool = false) throws -> String {
     let response = try connection.request(method: "session.acquire", params: .object([
-      "options": .object(["keepDisplayOn": .bool(display), "stopOnLidClose": .bool(lid)])
+      "options": .object(["keepDisplayOn": .bool(display)])
     ]))
     return try XCTUnwrap(response["sessionId"]?.stringValue)
   }
@@ -192,7 +191,7 @@ final class APIProcessTests: XCTestCase {
     XCTAssertEqual(fixture.value("power"), "1")
     _ = try owner.request(method: "session.update", params: .object([
       "sessionId": .string(id),
-      "options": .object(["keepDisplayOn": .bool(true), "stopOnLidClose": .bool(false)])
+      "options": .object(["keepDisplayOn": .bool(true)])
     ]))
     XCTAssertEqual(fixture.value("display"), "1")
     _ = try owner.request(method: "session.release", params: .object(["sessionId": .string(id)]))
@@ -246,24 +245,6 @@ final class APIProcessTests: XCTestCase {
     XCTAssertTrue(fixture.process.isRunning)
   }
 
-  func testLidEndsOnlyWatchedSession() throws {
-    let fixture = try Fixture()
-    defer { fixture.stop(); try? FileManager.default.removeItem(at: fixture.directory) }
-    let watched = try fixture.connect()
-    let other = try fixture.connect()
-    defer { watched.close(); other.close() }
-    let watchedID = try acquire(watched, lid: true)
-    _ = try acquire(other)
-    try "1".write(to: fixture.directory.appendingPathComponent("lid"), atomically: true, encoding: .utf8)
-    let event = try XCTUnwrap(watched.receive(timeout: 3))
-    XCTAssertEqual(event["event"]?.stringValue, "session.ended")
-    XCTAssertEqual(event["data"]?["sessionId"]?.stringValue, watchedID)
-    XCTAssertEqual(event["data"]?["reason"]?.stringValue, "lid_closed")
-    XCTAssertEqual(fixture.value("power"), "1")
-    other.close()
-    try fixture.waitFor("power", value: "0")
-  }
-
   func testSIGTERMRestoresAndSIGKILLJournalRecoversWithoutReacquisition() throws {
     let fixture = try Fixture()
     defer { fixture.stop(); try? FileManager.default.removeItem(at: fixture.directory) }
@@ -299,7 +280,7 @@ final class APIProcessTests: XCTestCase {
     let hello = try owner.receive()
     XCTAssertTrue(hello["result"]?["capabilities"]?.arrayValue?.contains(.string("session.stopSessions")) == true)
     try owner.send("acquire", "session.acquire", .object([
-      "options": .object(["keepDisplayOn": .bool(true), "stopOnLidClose": .bool(false)]),
+      "options": .object(["keepDisplayOn": .bool(true)]),
     ]))
     let ownerID = try XCTUnwrap(owner.receive()["result"]?["sessionId"]?.stringValue)
     let otherID = try acquire(other)
@@ -337,7 +318,7 @@ final class APIProcessTests: XCTestCase {
     try manager.send("subscribe", "status.subscribe")
     let initial = try XCTUnwrap(manager.receive()["result"])
     try manager.send("acquire", "session.acquire", .object([
-      "options": .object(["keepDisplayOn": .bool(true), "stopOnLidClose": .bool(false)]),
+      "options": .object(["keepDisplayOn": .bool(true)]),
     ]))
     let managerID = try XCTUnwrap(manager.receive()["result"]?["sessionId"]?.stringValue)
     XCTAssertEqual(try manager.receive()["event"], .string("status.changed"))

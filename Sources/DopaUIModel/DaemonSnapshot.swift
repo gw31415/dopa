@@ -8,8 +8,16 @@ public struct SessionOptions: Equatable, Sendable {
     self.keepDisplayOn = keepDisplayOn
     self.stopOnLidClose = stopOnLidClose
   }
-  public var json: JSONValue {
-    .object(["keepDisplayOn": .bool(keepDisplayOn), "stopOnLidClose": .bool(stopOnLidClose)])
+  public var daemonJSON: JSONValue {
+    .object(["keepDisplayOn": .bool(keepDisplayOn)])
+  }
+}
+
+public struct DaemonSessionOptions: Equatable, Sendable {
+  public let keepDisplayOn: Bool
+
+  public init(keepDisplayOn: Bool) {
+    self.keepDisplayOn = keepDisplayOn
   }
 }
 
@@ -18,7 +26,7 @@ public struct DaemonSession: Identifiable, Equatable, Sendable {
   public let clientName: String
   public let peerPID: Int32
   public let peerUID: UInt32?
-  public let options: SessionOptions
+  public let options: DaemonSessionOptions
 }
 
 public struct DaemonSnapshot: Equatable, Sendable {
@@ -58,7 +66,7 @@ public struct DaemonSnapshot: Equatable, Sendable {
         let name = item["clientName"]?.stringValue,
         case .number(let pid) = item["peerPID"], let processID = Int32(exactly: pid),
         let display = item["options"]?["keepDisplayOn"]?.boolValue,
-        let lid = item["options"]?["stopOnLidClose"]?.boolValue
+        item["options"]?.objectValue.map({ Set($0.keys) }) == ["keepDisplayOn"]
       else { throw SnapshotError.malformed }
       guard seenIDs.insert(id).inserted else { throw SnapshotError.malformed }
       let peerUID: UInt32?
@@ -69,7 +77,7 @@ public struct DaemonSnapshot: Equatable, Sendable {
         peerUID = parsed
       } else { peerUID = nil }
       decodedSessions.append(DaemonSession(id: id, clientName: name, peerPID: processID, peerUID: peerUID,
-        options: SessionOptions(keepDisplayOn: display, stopOnLidClose: lid)))
+        options: DaemonSessionOptions(keepDisplayOn: display)))
     }
     self.sessions = decodedSessions
   }

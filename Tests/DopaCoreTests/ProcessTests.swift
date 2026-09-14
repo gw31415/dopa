@@ -39,15 +39,13 @@ final class ProcessTests: XCTestCase {
   }
 
   private func fixture(
-    _ body: (URL, Process) throws -> Void, display: Bool = true, lid: Bool = false,
-    delay: Bool = false, initiallyClosed: Bool = false
+    _ body: (URL, Process) throws -> Void, display: Bool = true, delay: Bool = false
   ) throws {
     let directory = URL(fileURLWithPath: "/tmp").appendingPathComponent(
       "dopa-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
     defer { try? FileManager.default.removeItem(at: directory) }
     try write(directory, "power", "0")
-    try write(directory, "lid", initiallyClosed ? "1" : "0")
     if delay { try write(directory, "delay", "1") }
     let errorURL = directory.appendingPathComponent("stderr")
     FileManager.default.createFile(atPath: errorURL.path, contents: nil)
@@ -57,7 +55,6 @@ final class ProcessTests: XCTestCase {
     process.executableURL = binaries.appendingPathComponent("DopaTestHarness")
     process.environment = [
       "DOPA_TEST_DIRECTORY": directory.path, "DOPA_TEST_DISPLAY": display ? "1" : "0",
-      "DOPA_TEST_LID": lid ? "1" : "0",
     ]
     process.standardOutput = FileHandle.nullDevice
     process.standardError = error
@@ -122,36 +119,6 @@ final class ProcessTests: XCTestCase {
       XCTAssertFalse(
         FileManager.default.fileExists(
           atPath: directory.appendingPathComponent("state/session").path))
-    }
-  }
-
-  func testLidClosureDefaultsAndReadFailure() throws {
-    for (watch, initial, later, display) in [
-      (true, false, "1", true), (true, true, "1", true), (true, false, "bad", true),
-      (false, false, "1", false),
-    ] {
-      try fixture(
-        { directory, process in
-          if !initial {
-            try waitFor(directory, "power", "1", process: process)
-            if display { try waitFor(directory, "display", "1", process: process) }
-            try write(directory, "lid", later)
-            if !watch {
-              usleep(700_000)
-              XCTAssertTrue(process.isRunning)
-              XCTAssertEqual(value(directory, "power"), "1")
-              XCTAssertEqual(kill(process.processIdentifier, SIGTERM), 0)
-            }
-          }
-          try waitForExit(process)
-          XCTAssertEqual(
-            process.terminationStatus, later == "bad" ? 1 : 0, value(directory, "stderr") ?? "")
-          XCTAssertEqual(value(directory, "power"), "0")
-          XCTAssertFalse(
-            FileManager.default.fileExists(
-              atPath: directory.appendingPathComponent("state/session").path))
-          XCTAssertEqual(value(directory, "display"), !initial && display ? "0" : nil)
-        }, display: display, lid: watch, initiallyClosed: initial)
     }
   }
 

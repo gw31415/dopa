@@ -1,5 +1,6 @@
 import DopaAuthorization
 import DopaClient
+import DopaLid
 import DopaProtocol
 import Foundation
 import Observation
@@ -22,10 +23,12 @@ public final class AppModel {
   public var message: String?
 
   @ObservationIgnored private let transport: any DaemonTransport
+  @ObservationIgnored private let lidState: any LidStateReading
   public let currentUID: UInt32
   @ObservationIgnored private let authorize: @Sendable () async throws -> ManagementCredential
   @ObservationIgnored private var monitoring: Task<Void, Never>?
   @ObservationIgnored private var ticking: Task<Void, Never>?
+  @ObservationIgnored private var lidMonitoring: Task<Void, Never>?
   @ObservationIgnored private var transportCloseTask: (id: UInt64, task: Task<Void, Never>)?
   @ObservationIgnored private var nextTransportCloseID: UInt64 = 0
   @ObservationIgnored private var transportConnectInFlight = false
@@ -38,9 +41,15 @@ public final class AppModel {
 
   public init(
     transport: any DaemonTransport = SocketTransport(),
+    lidState: any LidStateReading = NativeLidState(),
     authorize: @escaping @Sendable () async throws -> ManagementCredential = { try await .request() },
     currentUID: UInt32 = geteuid()
-  ) { self.transport = transport; self.authorize = authorize; self.currentUID = currentUID }
+  ) {
+    self.transport = transport
+    self.lidState = lidState
+    self.authorize = authorize
+    self.currentUID = currentUID
+  }
 
   public var sessions: [DaemonSession] { snapshot?.sessions ?? [] }
   public var canManage: Bool { connectionState == .connected && capabilities.contains("admin.stopSessions") }
@@ -154,6 +163,53 @@ public final class AppModel {
     }
   }
 
+  private func refreshLidMonitoring() {
+    lidMonitoring?.cancel()
+    lidMonitoring = nil
+    guard !shuttingDown, options.stopOnLidClose, let sessionID = ownSessionID else { return }
+    let reader = lidState
+    lidMonitoring = Task.detached(priority: .utility) { [weak self] in
+      while !Task.isCancelled {
+        do {
+          if try reader.isClosed() {
+            while !Task.isCancelled {
+              guard let self else { return }
+              if await self.handleLidTrigger(sessionID: sessionID, readError: nil) { return }
+              try? await Task.sleep(nanoseconds: 300_000_000)
+            }
+          }
+        } catch {
+          let message = String(describing: error)
+          while !Task.isCancelled {
+            guard let self else { return }
+            if await self.handleLidTrigger(sessionID: sessionID, readError: message) { return }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+          }
+        }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+      }
+    }
+  }
+
+  private func readLidState() async throws -> Bool {
+    let reader = lidState
+    return try await Task.detached(priority: .userInitiated) { try reader.isClosed() }.value
+  }
+
+  private func handleLidTrigger(sessionID: String, readError: String?) async -> Bool {
+    guard !shuttingDown, options.stopOnLidClose, ownSessionID == sessionID else { return true }
+    guard !busy else { return false }
+    await stop()
+    guard ownSessionID != sessionID else { return false }
+    guard !cleanupUnconfirmed else { return true }
+    if let readError {
+      message = "ふたの状態を確認できなかったため停止しました。\n\(readError)"
+    } else {
+      message = "ふたを閉じたため停止しました。"
+    }
+    return true
+  }
+
   public func setPresentationActive(_ active: Bool) {
     presentationActive = active
     if active { now = Date() }
@@ -187,6 +243,7 @@ public final class AppModel {
     guard !shuttingDown else { throw CancellationError() }
     if let ownSessionID { cleanupUnconfirmed = true; pendingCleanupIDs.insert(ownSessionID) }
     ownSessionID = nil
+    refreshLidMonitoring()
     if schedule.running { schedule.stop() }
     revisionFloor = nil
     let generation = connectionGeneration
@@ -245,7 +302,11 @@ public final class AppModel {
       !DaemonSnapshot.revision(next.revision, isAtLeast: floor.revision) { return }
     if let previous = snapshot {
       guard next.isAtLeastAsNew(as: previous) else { return }
-      if next.instanceID != previous.instanceID { ownSessionID = nil; schedule.stop() }
+      if next.instanceID != previous.instanceID {
+        ownSessionID = nil
+        schedule.stop()
+        refreshLidMonitoring()
+      }
     }
     // Steady-state polls often deliver a snapshot identical to the published one;
     // equal content makes every step below rewrite the same values, so skip the
@@ -258,8 +319,13 @@ public final class AppModel {
     }
     snapshot = next
     if let ownSessionID {
-      if let own = next.sessions.first(where: { $0.id == ownSessionID }) { options = own.options }
-      else { self.ownSessionID = nil; schedule.stop() }
+      if let own = next.sessions.first(where: { $0.id == ownSessionID }) {
+        options.keepDisplayOn = own.options.keepDisplayOn
+      } else {
+        self.ownSessionID = nil
+        schedule.stop()
+        refreshLidMonitoring()
+      }
     }
     if ownSessionID == nil && next.isConfirmed,
       pendingCleanupIDs.isEmpty
@@ -279,13 +345,13 @@ public final class AppModel {
       guard let ownSessionID, event["data"]?["sessionId"]?.stringValue == ownSessionID else { return }
       self.ownSessionID = nil
       schedule.stop()
+      refreshLidMonitoring()
       if event["data"]?["cleanup"]?.stringValue != "confirmed" {
         pendingCleanupIDs.insert(ownSessionID)
         cleanupUnconfirmed = true
         message = "スリープ防止は終了しましたが、電源設定の復元を確認できません。"
       } else {
         switch event["data"]?["reason"]?.stringValue {
-        case "lid_closed": message = "ふたを閉じたため停止しました。"
         case "daemon_shutdown": message = "サービスの終了により停止しました。"
         case "user_stopped": message = "全体管理の操作により停止しました。"
         default: message = "サービスによりスリープ防止が終了しました。"
@@ -321,6 +387,7 @@ public final class AppModel {
     ownSessionID = nil
     capabilities = []
     if schedule.running { schedule.stop() }
+    refreshLidMonitoring()
     message = "サービスに接続できません。dopa-daemonのインストールと起動を確認してください。\n\(error)"
     await closeTransport()
   }
@@ -401,7 +468,6 @@ public final class AppModel {
     }
     if let remote = error as? DopaRemoteError {
       switch remote.code {
-      case "lid_closed": message = "ふたが閉じています。開いてから操作してください。"
       case "permission_denied": message = "停止に必要な管理者権限を確認できませんでした。"
       case "recovery_failed": message = "電源設定の復元を確認できません。サービスの状態を確認してください。"
       case "power_conflict": message = "ほかのツールがスリープ設定を変更しているため開始できません。"
@@ -413,17 +479,30 @@ public final class AppModel {
 
   public func start() async {
     guard canStart, ownSessionID == nil else { return }
+    busy = true
+    defer { busy = false }
+    if options.stopOnLidClose {
+      do {
+        guard try await !readLidState() else {
+          message = "ふたが閉じています。開いてから操作してください。"
+          return
+        }
+      } catch {
+        message = "ふたの状態を確認できないため開始できません。\n\(error)"
+        return
+      }
+    }
     // Validate the absolute time before contacting the daemon, then again after its response.
     var proposed = schedule
     do { try proposed.start(now: Date()) }
     catch { message = String(describing: error); return }
-    busy = true
-    defer { busy = false }
     cleanupUnconfirmed = true
     do {
-      let result = try await transport.request(method: "session.acquire", params: .object(["options": options.json]))
+      let result = try await transport.request(
+        method: "session.acquire", params: .object(["options": options.daemonJSON]))
       guard let id = result["sessionId"]?.stringValue else { throw SnapshotError.malformed }
       ownSessionID = id
+      refreshLidMonitoring()
       try recordMutation(result)
       cleanupUnconfirmed = false
       // Publish the same instant used for the deadline, so a stale display tick
@@ -435,6 +514,7 @@ public final class AppModel {
         try recordMutation(released)
         ownSessionID = nil
         schedule.stop()
+        refreshLidMonitoring()
         message = "指定した終了時刻を過ぎました。時刻を設定し直してください。"
       }
       // A new owned schedule may carry a finite deadline the sleeping ticker
@@ -457,20 +537,38 @@ public final class AppModel {
       pendingCleanupIDs.remove(id)
       ownSessionID = nil
       schedule.stop()
+      refreshLidMonitoring()
       try await refresh()
     } catch { await report(error) }
   }
 
   public func setOptions(_ next: SessionOptions) async {
     guard !busy else { return }
-    guard let id = ownSessionID else { options = next; return }
     busy = true
     defer { busy = false }
+    if next.stopOnLidClose && !options.stopOnLidClose {
+      do {
+        guard try await !readLidState() else {
+          message = "ふたが閉じています。開いてから操作してください。"
+          return
+        }
+      } catch {
+        message = "ふたの状態を確認できないため設定を変更できません。\n\(error)"
+        return
+      }
+    }
+    guard let id = ownSessionID else { options = next; return }
+    guard next.keepDisplayOn != options.keepDisplayOn else {
+      options = next
+      refreshLidMonitoring()
+      return
+    }
     do {
       let result = try await transport.request(method: "session.update", params: .object([
-        "sessionId": .string(id), "options": next.json]))
+        "sessionId": .string(id), "options": next.daemonJSON]))
       try recordMutation(result)
       options = next
+      refreshLidMonitoring()
       try await refresh()
     } catch { await report(error) }
   }
@@ -560,6 +658,7 @@ public final class AppModel {
     shuttingDown = true
     monitoring?.cancel()
     ticking?.cancel()
+    lidMonitoring?.cancel()
     await closeTransport()
     await waitForTransportConnects()
     return true

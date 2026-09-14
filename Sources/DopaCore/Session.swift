@@ -3,10 +3,9 @@ public protocol Power: AnyObject {
   func setDisabled(_ disabled: Bool) throws
 }
 
-public protocol Controls: AnyObject {
+public protocol DisplayControls: AnyObject {
   func keepDisplayOn() throws
   func releaseDisplay() throws
-  func lidClosed() throws -> Bool
 }
 
 public enum Session {

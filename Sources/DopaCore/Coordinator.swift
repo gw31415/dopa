@@ -17,12 +17,12 @@ final class Coordinator {
   private let listener: Int32
   private let state: State
   private let power: any Power
-  private let controls: any Controls
+  private let controls: any DisplayControls
   private var clients: [Client] = []
   private var inhibiting = false
   private var displaying = false
 
-  init(listener: Int32, state: State, power: any Power, controls: any Controls) {
+  init(listener: Int32, state: State, power: any Power, controls: any DisplayControls) {
     self.listener = listener
     self.state = state
     self.power = power
@@ -52,7 +52,6 @@ final class Coordinator {
   private func monitor() throws {
     let startupDeadline = DispatchTime.now().uptimeNanoseconds + 5_000_000_000
     var acceptedClient = false
-    var lastLidCheck: UInt64 = 0
     while true {
       if dopa_stop_requested() != 0 { return }
       var descriptors =
@@ -84,21 +83,6 @@ final class Coordinator {
         }
         if readable.contains(client.channel.value) { receive(client) }
       }
-      let watchers = clients.filter { $0.completion == nil && $0.options?.stopOnLidClose == true }
-      if !watchers.isEmpty,
-        now - lastLidCheck >= 250_000_000 || watchers.contains(where: { !$0.ready })
-      {
-        do {
-          if try controls.lidClosed() {
-            for client in watchers { client.completion = Wire.done }
-            log("lid closed; releasing sessions that requested --stop-on-lid-close")
-          }
-        } catch {
-          log("read lid: \(error)")
-          for client in watchers { client.completion = Wire.failed }
-        }
-        lastLidCheck = now
-      }
       try reconcile()
       if clients.isEmpty && (acceptedClient || now >= startupDeadline) { return }
     }
@@ -110,10 +94,10 @@ final class Coordinator {
     if count < 0 && (errno == EAGAIN || errno == EINTR) { return }
     if count == 0 {
       client.completion = Wire.done
-    } else if count < 0 || client.options != nil || !(0xA0...0xA3).contains(byte) {
+    } else if count < 0 || client.options != nil || !(0xA0...0xA1).contains(byte) {
       client.completion = Wire.failed
     } else {
-      client.options = Options(keepDisplayOn: byte & 1 != 0, stopOnLidClose: byte & 2 != 0)
+      client.options = Options(keepDisplayOn: byte & 1 != 0)
     }
   }
 

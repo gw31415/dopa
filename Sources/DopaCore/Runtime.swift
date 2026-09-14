@@ -67,9 +67,7 @@ public enum Runtime {
     throws -> Bool
   {
     defer { _ = shutdown(channel, SHUT_RDWR) }
-    let registration: UInt8 =
-      0xA0 | (options.keepDisplayOn ? 1 : 0)
-      | (options.stopOnLidClose ? 2 : 0)
+    let registration: UInt8 = 0xA0 | (options.keepDisplayOn ? 1 : 0)
     guard Wire.send(registration, to: channel) else { return false }
     var ready = false
     var stopping = false
@@ -146,7 +144,7 @@ public enum Runtime {
   }
 
   public static func guardian(
-    path: String = "/var/db/dopa", power: any Power, controls: any Controls
+    path: String = "/var/db/dopa", power: any Power, controls: any DisplayControls
   ) throws {
     guard setsid() >= 0 else { throw systemError("detach guardian session") }
     let state: State
@@ -168,7 +166,7 @@ public enum Runtime {
   }
 }
 
-// One-byte versioned registration (0xA0..0xA3) and replies. No persisted client
+// One-byte versioned registration (0xA0..0xA1) and replies. No persisted client
 // count: the open socket connections are the live session ownership records.
 enum Wire {
   static let ready: UInt8 = 82

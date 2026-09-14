@@ -72,6 +72,40 @@ else
 fi
 swift_build_args+=(--scratch-path "${SCRATCH_PATH}")
 
+# Local and UI-fixture builds remain ad-hoc signed. A distribution build can
+# opt into a Developer ID Application identity without changing the normal
+# developer workflow. Keep every user-controlled value in an array and reject
+# option-looking/control-character values before passing it to codesign.
+CODESIGN_IDENTITY=-
+CODESIGN_KEYCHAIN_ARGS=()
+CODESIGN_HARDENED_ARGS=()
+validate_codesign_value() {
+  local label="$1"
+  local value="$2"
+  [[ -n "${value}" ]] || die "${label} must not be empty"
+  [[ "${value}" != -* ]] || die "${label} must not start with '-'"
+  case "${value}" in
+    *$'\n'*|*$'\r'*|*$'\t'*) die "${label} contains a control character" ;;
+  esac
+}
+if (( ! fixture )) && [[ "${DOPA_CODESIGN_IDENTITY+x}" == x ]]; then
+  validate_codesign_value DOPA_CODESIGN_IDENTITY "${DOPA_CODESIGN_IDENTITY}"
+  CODESIGN_IDENTITY="${DOPA_CODESIGN_IDENTITY}"
+  CODESIGN_HARDENED_ARGS=(--options runtime --timestamp)
+  if [[ "${DOPA_CODESIGN_KEYCHAIN+x}" == x ]]; then
+    validate_codesign_value DOPA_CODESIGN_KEYCHAIN "${DOPA_CODESIGN_KEYCHAIN}"
+    CODESIGN_KEYCHAIN_ARGS=(--keychain "${DOPA_CODESIGN_KEYCHAIN}")
+  fi
+elif (( ! fixture )) && [[ "${DOPA_CODESIGN_KEYCHAIN+x}" == x ]]; then
+  die "DOPA_CODESIGN_KEYCHAIN requires DOPA_CODESIGN_IDENTITY"
+fi
+CODESIGN_ARGS=(
+  --force
+  --sign "${CODESIGN_IDENTITY}"
+  "${CODESIGN_KEYCHAIN_ARGS[@]}"
+  "${CODESIGN_HARDENED_ARGS[@]}"
+)
+
 # Serialise each destination bundle for the whole build. Without this lock,
 # concurrent invocations can both remove/replace the same final path and one
 # `mv` can silently nest its staging bundle inside the other result.
@@ -137,7 +171,7 @@ if (( ! fixture )); then
   mkdir -p "${HELPERS_PATH}"
   for helper in dopa dopa-daemon; do
     install -m 0755 "${BIN_DIR}/${helper}" "${HELPERS_PATH}/${helper}"
-    codesign --force --sign - "${HELPERS_PATH}/${helper}" >/dev/null
+    codesign "${CODESIGN_ARGS[@]}" "${HELPERS_PATH}/${helper}" >/dev/null
   done
 fi
 cp "${INFO_PLIST_SOURCE}" "${INFO_PLIST_PATH}"
@@ -191,7 +225,12 @@ plutil -lint "${INFO_PLIST_PATH}" >/dev/null
 [[ "$(plutil -extract LSUIElement raw -o - "${INFO_PLIST_PATH}")" == true ]] \
   || die "LSUIElement must be true"
 
-codesign --force --sign - "${STAGING_APP_PATH}" >/dev/null
+# Sign the main executable before the enclosing bundle so a configured
+# Developer ID identity gets hardened-runtime and secure-timestamp settings
+# on both code objects. The final bundle signature then records these nested
+# signatures and remains compatible with the existing verification below.
+codesign "${CODESIGN_ARGS[@]}" "${MACOS_PATH}/dopa-ui" >/dev/null
+codesign "${CODESIGN_ARGS[@]}" "${STAGING_APP_PATH}" >/dev/null
 codesign --verify --deep --strict --verbose=2 "${STAGING_APP_PATH}" >/dev/null
 [[ -x "${MACOS_PATH}/dopa-ui" ]] || die "missing executable dopa-ui in bundle"
 codesign --verify --strict --verbose=2 "${MACOS_PATH}/dopa-ui" >/dev/null

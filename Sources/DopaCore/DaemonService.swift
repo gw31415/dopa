@@ -39,22 +39,19 @@ public enum DaemonService {
   }
 
   /// Milliseconds until the next timer-driven work, for the run loop's poll()
-  /// timeout: lid recheck (only while a lid-close session exists), power
-  /// recheck (only while peers exist), and each peer's hello / partial-frame
-  /// deadline. Returns -1 when nothing is pending, so an idle daemon sleeps
+  /// timeout: power recheck (only while peers exist), and each peer's hello /
+  /// partial-frame deadline. Returns -1 when nothing is pending, so an idle daemon sleeps
   /// until socket or stop-pipe activity. Communication wakes poll() regardless
   /// of this timeout, and stop signals arrive through the stop self-pipe even
   /// when the timeout is infinite, so no deadline or notification is missed.
   static func pollTimeoutMilliseconds(
-    now: Date, nextLid: Date, nextCheck: Date,
-    peers: [Int32: ServicePeer], hasLidSessions: Bool
+    now: Date, nextCheck: Date, peers: [Int32: ServicePeer]
   ) -> Int32 {
     var earliest: TimeInterval?
     func consider(_ date: Date) {
       let remaining = date.timeIntervalSince(now)
       if earliest == nil || remaining < earliest! { earliest = remaining }
     }
-    if hasLidSessions { consider(nextLid) }
     if !peers.isEmpty { consider(nextCheck) }
     for peer in peers.values {
       if !peer.hello { consider(peer.created.addingTimeInterval(5)) }
@@ -69,7 +66,7 @@ public enum DaemonService {
 
   public static func run(
     statePath: String = "/var/db/dopa", socketPath: String = "/var/run/dopa/control.sock",
-    allowedUID: uid_t, power: any Power, controls: any Controls, requireRoot: Bool = true,
+    allowedUID: uid_t, power: any Power, controls: any DisplayControls, requireRoot: Bool = true,
     authorizationVerifier: ((Data) -> Bool)? = nil
   ) throws {
     guard !requireRoot || geteuid() == 0 else { throw DopaError("daemon run requires root") }
@@ -115,7 +112,6 @@ public enum DaemonService {
     defer { if !finished { try? engine.prepareShutdown() } }
     var peers: [Int32: ServicePeer] = [:]
     var nextCheck = Date.distantPast
-    var nextLid = Date.distantPast
     func publish() {
       let events = engine.takeEvents()
       for (owner, event) in events { peers[owner]?.enqueue(event) }
@@ -132,10 +128,8 @@ public enum DaemonService {
     let stopFD = dopa_stop_fd()
     var drainByte: UInt8 = 0
     while dopa_stop_requested() == 0 {
-      let hasLidSessions = engine.sessions.values.contains { $0.options.stopOnLidClose }
       let timeout = stopFD < 0 ? 50 : DaemonService.pollTimeoutMilliseconds(
-        now: Date(), nextLid: nextLid, nextCheck: nextCheck,
-        peers: peers, hasLidSessions: hasLidSessions)
+        now: Date(), nextCheck: nextCheck, peers: peers)
       // Rebuild registrations from scratch so accept/close/FD reuse is reflected.
       polls.removeAll(keepingCapacity: true)
       polls.append(pollfd(fd: fd, events: Int16(POLLIN), revents: 0))
@@ -226,10 +220,6 @@ public enum DaemonService {
           engine.disconnect(id)
           peers.removeValue(forKey: id)
         }
-      }
-      if now >= nextLid {
-        engine.checkLid()
-        nextLid = now.addingTimeInterval(0.3)
       }
       if !peers.isEmpty && now >= nextCheck {
         engine.checkPower()
@@ -366,15 +356,19 @@ private struct APIError: Error {
 }
 
 final class DaemonEngine {
+  struct SessionOptions {
+    let keepDisplayOn: Bool
+  }
+
   struct Owned {
     let id: String
     let peer: ServicePeer
-    var options: Options
+    var options: SessionOptions
     let created: String
   }
   let state: State
   let power: any Power
-  let controls: any Controls
+  let controls: any DisplayControls
   let authorizationVerifier: (Data) -> Bool
   let instanceID = UUID().uuidString
   var revision: UInt64 = 0
@@ -388,7 +382,7 @@ final class DaemonEngine {
   var draining = false
   private var events: [(Int32, JSONValue)] = []
   init(
-    state: State, power: any Power, controls: any Controls,
+    state: State, power: any Power, controls: any DisplayControls,
     authorizationVerifier: @escaping (Data) -> Bool = DopaAuthorization.verifyExternalForm
   ) {
     self.state = state
@@ -452,11 +446,8 @@ final class DaemonEngine {
       "recoveryPending": .bool((try? state.pending()) ?? true), "lastError": lastError,
     ])
   }
-  private func optionsValue(_ options: Options) -> JSONValue {
-    .object([
-      "keepDisplayOn": .bool(options.keepDisplayOn),
-      "stopOnLidClose": .bool(options.stopOnLidClose),
-    ])
+  private func optionsValue(_ options: SessionOptions) -> JSONValue {
+    .object(["keepDisplayOn": .bool(options.keepDisplayOn)])
   }
   private func fields(_ value: JSONValue, _ keys: Set<String>) throws -> [String: JSONValue] {
     guard let object = value.objectValue, Set(object.keys) == keys else {
@@ -464,21 +455,12 @@ final class DaemonEngine {
     }
     return object
   }
-  private func options(_ value: JSONValue) throws -> Options {
-    let object = try fields(value, ["keepDisplayOn", "stopOnLidClose"])
-    guard let display = object["keepDisplayOn"]?.boolValue,
-      let lid = object["stopOnLidClose"]?.boolValue
-    else { throw APIError("invalid_params", "options must be boolean") }
-    return Options(keepDisplayOn: display, stopOnLidClose: lid)
-  }
-  private func checkLidBefore(_ options: Options) throws {
-    if options.stopOnLidClose {
-      let closed: Bool
-      do { closed = try controls.lidClosed() } catch {
-        throw APIError("lid_unavailable", "\(error)")
-      }
-      if closed { throw APIError("lid_closed", "lid is already closed") }
+  private func options(_ value: JSONValue) throws -> SessionOptions {
+    let object = try fields(value, ["keepDisplayOn"])
+    guard let display = object["keepDisplayOn"]?.boolValue else {
+      throw APIError("invalid_params", "keepDisplayOn must be boolean")
     }
+    return SessionOptions(keepDisplayOn: display)
   }
   func handle(_ request: JSONValue, peer: ServicePeer) -> JSONValue {
     var id: JSONValue = .null
@@ -564,7 +546,6 @@ final class DaemonEngine {
             throw APIError("session_not_owned", "session not owned")
           }
         }
-        try checkLidBefore(option)
         if sessions.isEmpty {
           do {
             if try power.readDisabled() {
@@ -775,17 +756,6 @@ final class DaemonEngine {
       fail("power_failed", "\(error)")
     }
   }
-  func checkLid() {
-    let keys = sessions.filter { $0.value.options.stopOnLidClose }.map(\.key)
-    guard !keys.isEmpty else { return }
-    let reason: String
-    do {
-      guard try controls.lidClosed() else { return }
-      reason = "lid_closed"
-    } catch { reason = "lid_error" }
-    do { try terminate(reason, keys: keys) } catch { fail("recovery_failed", "\(error)") }
-  }
-
   func prepareShutdown() throws {
     draining = true
     do {

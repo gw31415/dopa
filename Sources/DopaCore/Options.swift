@@ -7,13 +7,11 @@ public struct DopaError: Error, CustomStringConvertible {
 
 public struct Options: Equatable, Sendable {
   public var keepDisplayOn: Bool
-  public var stopOnLidClose: Bool
-  public init(keepDisplayOn: Bool = false, stopOnLidClose: Bool = false) {
+  public init(keepDisplayOn: Bool = false) {
     self.keepDisplayOn = keepDisplayOn
-    self.stopOnLidClose = stopOnLidClose
   }
   public var arguments: [String] {
-    (keepDisplayOn ? ["--keep-display-on"] : []) + (stopOnLidClose ? ["--stop-on-lid-close"] : [])
+    keepDisplayOn ? ["--keep-display-on"] : []
   }
   public enum Action: Equatable {
     case run(Options)
@@ -32,8 +30,6 @@ public struct Options: Equatable, Sendable {
         endedOptions = true
       case "--keep-display-on":
         options.keepDisplayOn = true
-      case "--stop-on-lid-close":
-        options.stopOnLidClose = true
       case "--help":
         help = true
       case let shortGroup where shortGroup.hasPrefix("-") && !shortGroup.hasPrefix("--"):
@@ -44,7 +40,6 @@ public struct Options: Equatable, Sendable {
         for flag in flags {
           switch flag {
           case UInt8(ascii: "d"): options.keepDisplayOn = true
-          case UInt8(ascii: "l"): options.stopOnLidClose = true
           case UInt8(ascii: "h"): help = true
           default:
             throw DopaError("unknown argument: \(arg); use dopa --help")
@@ -62,8 +57,6 @@ public struct Options: Equatable, Sendable {
     Usage: sudo dopa [OPTIONS]
 
       -d, --keep-display-on     Prevent idle display sleep (default: off)
-      -l, --stop-on-lid-close   End this session when the lid closes
-                               (default: off; also exits if already closed)
       -h, --help                Print help; no sudo required
 
     Without options, keep the system awake even with the lid closed.

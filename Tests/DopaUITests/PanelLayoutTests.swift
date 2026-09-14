@@ -16,10 +16,10 @@ final class PanelLayoutTests: XCTestCase {
       "sessions": .array([
         .object(["id": .string("cli-one"), "clientName": .string("dopa CLI"),
           "peerUID": .number(501), "peerPID": .number(12001),
-          "options": .object(["keepDisplayOn": .bool(false), "stopOnLidClose": .bool(true)])]),
+          "options": .object(["keepDisplayOn": .bool(false)])]),
         .object(["id": .string("cli-two"), "clientName": .string("dopa CLI"),
           "peerUID": .number(501), "peerPID": .number(12002),
-          "options": .object(["keepDisplayOn": .bool(true), "stopOnLidClose": .bool(false)])]),
+          "options": .object(["keepDisplayOn": .bool(true)])]),
       ]),
     ]))
     let model = AppModel(transport: LayoutTransport(snapshot: snapshot,

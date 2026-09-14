@@ -156,3 +156,4 @@ dopa
 * [UIの仕様](docs/ui-concept.md)
 * [実機での確認手順](docs/acceptance.md)
 * [リソース使用量の計測](docs/resource-measurements.md)
+* [リリース手順とHomebrew連携](docs/releasing.md)
