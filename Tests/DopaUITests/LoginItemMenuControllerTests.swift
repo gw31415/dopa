@@ -5,6 +5,19 @@ import XCTest
 @available(macOS 26.0, *)
 @MainActor
 final class LoginItemMenuControllerTests: XCTestCase {
+  func testSystemNotFoundStatusRemainsAvailableForInitialRegistration() {
+    XCTAssertEqual(
+      SystemLoginItemManager.loginItemStatus(for: .notFound),
+      .disabled)
+
+    let manager = StubLoginItemManager(
+      status: SystemLoginItemManager.loginItemStatus(for: .notFound))
+    let controller = LoginItemMenuController(manager: manager) { _ in }
+
+    XCTAssertEqual(controller.menuItem.state, .off)
+    XCTAssertTrue(controller.menuItem.isEnabled)
+  }
+
   func testMenuStateTracksManagerWheneverMenuOpens() {
     let manager = StubLoginItemManager(status: .disabled)
     let controller = LoginItemMenuController(manager: manager) { _ in }

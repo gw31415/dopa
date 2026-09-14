@@ -22,11 +22,18 @@ struct SystemLoginItemManager: LoginItemManaging {
   private var service: SMAppService { .mainApp }
 
   var status: LoginItemStatus {
-    switch service.status {
+    Self.loginItemStatus(for: service.status)
+  }
+
+  static func loginItemStatus(for status: SMAppService.Status) -> LoginItemStatus {
+    switch status {
     case .notRegistered: .disabled
     case .enabled: .enabled
     case .requiresApproval: .requiresApproval
-    case .notFound: .unavailable
+    // Service Management also reports notFound before it has ever seen the
+    // main-app login item. Registration is the operation that makes it known,
+    // so keep the menu actionable in this state.
+    case .notFound: .disabled
     @unknown default: .unavailable
     }
   }
