@@ -43,7 +43,7 @@ Dopa.appからのdaemon導入・起動は、制御端末を持つ `/usr/bin/sudo
 
 ### 公開配布とHomebrew tap
 
-`release/artifacts.json`を公開物の唯一のinventoryとし、GitHub ReleaseにApp、CLI、shell completion、Cask、manifest、checksumを公開する。ビルド、署名検査、archive間の同一性、公開assetの再download、Caskの生成、Homebrewによる実インストール、quarantine、CLI、App起動、uninstallまでを`dopa`のRelease workflowで検証する。この検証jobは`id-token`権限を持たない。`homebrew-tap`はCaskを保持して人間がmergeする公開indexであり、ビルド、検証、GitHub Actions、runner、repository secretを持たない。
+`release/artifacts.json`を公開物の唯一のinventoryとし、GitHub ReleaseにApp、単体CLI、CLI archive、shell completion、Cask、manifest、checksumを公開する。単体CLIはApp内helperおよびCLI archive内の実体と同一でなければならない。ビルド、署名検査、archive間の同一性、公開assetの再download、Caskの生成、Homebrewによる実インストール、quarantine、CLI、App起動、uninstallまでを`dopa`のRelease workflowで検証する。この検証jobは`id-token`権限を持たない。`homebrew-tap`はCaskを保持して人間がmergeする公開indexであり、ビルド、検証、GitHub Actions、runner、repository secretを持たない。
 
 stable releaseの検証後に限り、Release workflowは新しいrunnerのpublication jobを開始し、`homebrew-release` environmentからGitHub Actions OIDC tokenを取得する。検証jobからはCask本文とSHA-256だけを受け取り、source checkout、tap script、release binaryを実行しない。`homebrew-tap`だけにinstallしたOcto STS GitHub Appが、tapのdefault branchに置いたtrust policyとOIDC claimを照合し、Contents、Pull requests、Commit statusesだけをwrite可能にした短命installation tokenへ交換する。PAT、deploy key、App private keyをリポジトリへ保存しない。強いtokenは検証済みCaskのpush、head SHAへの`dopa/release-verified` status、PR作成にだけ使う。
 

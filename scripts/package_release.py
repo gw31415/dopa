@@ -139,6 +139,16 @@ for index, product in enumerate(products):
         }
     )
 
+standalone_binary_names = {
+    product["name"]
+    for product in normalized_products
+    if product["classification"] == "cli"
+}
+archive_asset_names = {app_archive, cli_archive, homebrew_cask} | reserved_assets
+colliding_assets = sorted(standalone_binary_names & archive_asset_names)
+if colliding_assets:
+    fail(f"standalone CLI asset names collide with reserved assets: {colliding_assets}")
+
 package = load_json(package_path, "SwiftPM package description")
 try:
     swift_products = package["products"]
@@ -297,6 +307,15 @@ for product in normalized_products:
     validate_binary(source, product["name"], product["classification"] == "cli")
     product_sources[product["name"]] = source
 
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 dist = root / "dist"
 if dist.resolve().parent != root:
     fail(f"refusing unsafe dist path: {dist}")
@@ -305,6 +324,20 @@ if dist.exists():
         fail(f"refusing to replace non-directory dist path: {dist}")
     shutil.rmtree(dist)
 dist.mkdir(mode=0o755)
+
+
+standalone_binary_paths: dict[str, Path] = {}
+for product in normalized_products:
+    if product["classification"] != "cli":
+        continue
+    source = product_sources[product["name"]]
+    standalone = dist / product["name"]
+    shutil.copyfile(source, standalone)
+    standalone.chmod(source.stat().st_mode & 0o777)
+    if sha256(source) != sha256(standalone):
+        fail(f"standalone CLI binary differs from the app helper: {product['name']}")
+    validate_binary(standalone, f"standalone {product['name']}", True)
+    standalone_binary_paths[product["name"]] = standalone
 
 
 app_archive_path = dist / app_archive
@@ -368,15 +401,6 @@ with cli_archive_path.open("wb") as raw_stream:
                 with source.open("rb") as stream:
                     archive.addfile(info, stream)
 
-
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 for entry in normalized_files:
     if not entry["archivePath"].startswith("completions/"):
         continue
@@ -404,7 +428,7 @@ run_checked(["ruby", "-c", str(homebrew_cask_path)], "Homebrew Cask syntax valid
 
 
 manifest = {
-    "schemaVersion": 1,
+    "schemaVersion": 2,
     "version": version,
     "tag": tag,
     "target": {"os": "macOS", "architecture": "arm64"},
@@ -437,6 +461,16 @@ manifest = {
                 if product["classification"] == "cli"
             ],
         },
+        *[
+            {
+                "name": product["name"],
+                "sha256": sha256(standalone_binary_paths[product["name"]]),
+                "kind": "cli-binary",
+                "product": product["name"],
+            }
+            for product in normalized_products
+            if product["classification"] == "cli"
+        ],
         {
             "name": homebrew_cask,
             "sha256": sha256(homebrew_cask_path),
@@ -452,7 +486,13 @@ manifest_path.write_text(
     encoding="utf-8",
 )
 
-checksummed = [app_archive_path, cli_archive_path, homebrew_cask_path, manifest_path]
+checksummed = [
+    app_archive_path,
+    cli_archive_path,
+    homebrew_cask_path,
+    manifest_path,
+    *standalone_binary_paths.values(),
+]
 checksums_path = dist / "SHA256SUMS"
 checksums_path.write_text(
     "".join(
@@ -487,8 +527,12 @@ for archive_path, original in cli_entries.items():
 for product in normalized_products:
     if product["classification"] != "cli":
         continue
+    standalone = standalone_binary_paths[product["name"]]
+    archived = tar_extract / PurePosixPath(product["archivePath"])
+    if sha256(standalone) != sha256(archived):
+        fail(f"standalone CLI binary differs from the CLI archive: {product['name']}")
     validate_binary(
-        tar_extract / PurePosixPath(product["archivePath"]),
+        archived,
         f"CLI archive {product['name']}",
         True,
     )
@@ -499,6 +543,7 @@ expected_assets = {
     homebrew_cask,
     "release-manifest.json",
     "SHA256SUMS",
+    *standalone_binary_names,
 }
 actual_assets = {path.name for path in dist.iterdir() if path.is_file()}
 if actual_assets != expected_assets:

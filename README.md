@@ -42,6 +42,8 @@ brew install --cask gw31415/tap/dopa
 ### 手動インストール
 
 Homebrewを使用しない場合は、[最新のダウンロードページ](https://github.com/gw31415/dopa/releases/latest)から入手できます。
+`Dopa-macos-arm64.zip` がメニューバーアプリ、`dopa` と `dopa-daemon` が単体実行ファイルです。
+単体実行ファイルは `SHA256SUMS` を確認した後、`chmod +x dopa dopa-daemon` で実行権を付けてください。
 
 ### 初回起動の許可
 

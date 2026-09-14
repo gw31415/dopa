@@ -85,7 +85,13 @@ jobs:
             "${cli_archive}" \
             "${homebrew_cask}" \
             release-manifest.json \
-            SHA256SUMS | LC_ALL=C sort >expected-assets.txt
+            SHA256SUMS >expected-assets.txt
+          mise exec -- python -c '
+          import json
+          products = json.load(open("release/artifacts.json"))["products"]
+          print("\n".join(product["name"] for product in products if product["classification"] == "cli"))
+          ' >>expected-assets.txt
+          LC_ALL=C sort -o expected-assets.txt expected-assets.txt
           gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
             --json assets --jq '.assets[].name' | LC_ALL=C sort >published-assets.txt
           if diff -q expected-assets.txt published-assets.txt >/dev/null; then
@@ -149,7 +155,13 @@ jobs:
             "${cli_archive}" \
             "${homebrew_cask}" \
             release-manifest.json \
-            SHA256SUMS | LC_ALL=C sort >expected-assets.txt
+            SHA256SUMS >expected-assets.txt
+          mise exec -- python -c '
+          import json
+          products = json.load(open("release/artifacts.json"))["products"]
+          print("\n".join(product["name"] for product in products if product["classification"] == "cli"))
+          ' >>expected-assets.txt
+          LC_ALL=C sort -o expected-assets.txt expected-assets.txt
           assets=()
           if [[ "${ASSETS_REUSABLE}" != true ]]; then
             assets=(dist/*)

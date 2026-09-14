@@ -69,12 +69,19 @@ if distribution != {
 }:
     fail("release inventory must require ad-hoc signing, hardened runtime, and no notarization")
 
+try:
+    cli_products = [product for product in products if product["classification"] == "cli"]
+    standalone_binary_names = {product["name"] for product in cli_products}
+except (KeyError, TypeError):
+    fail("release inventory contains an invalid product")
+
 expected_asset_names = {
     app_archive_name,
     cli_archive_name,
     homebrew_cask_name,
     "release-manifest.json",
     "SHA256SUMS",
+    *standalone_binary_names,
 }
 actual_asset_names = {path.name for path in asset_directory.iterdir() if path.is_file()}
 if actual_asset_names != expected_asset_names:
@@ -88,6 +95,7 @@ checksum_names = {
     cli_archive_name,
     homebrew_cask_name,
     "release-manifest.json",
+    *standalone_binary_names,
 }
 checksums = {}
 try:
@@ -111,7 +119,7 @@ require_exact_keys(
     {"schemaVersion", "version", "tag", "target", "distribution", "assets"},
     "release manifest",
 )
-if manifest["schemaVersion"] != 1 or manifest["tag"] != tag or manifest["version"] != version:
+if manifest["schemaVersion"] != 2 or manifest["tag"] != tag or manifest["version"] != version:
     fail("release manifest version or tag does not match the requested release")
 if manifest["target"] != {"os": "macOS", "architecture": "arm64"}:
     fail("release manifest target is not macOS arm64")
@@ -123,10 +131,11 @@ try:
     manifest_assets = {asset["name"]: asset for asset in manifest["assets"]}
 except (KeyError, TypeError):
     fail("release manifest contains an invalid asset")
-if len(manifest_assets) != 3 or set(manifest_assets) != {
+if len(manifest_assets) != 3 + len(standalone_binary_names) or set(manifest_assets) != {
     app_archive_name,
     cli_archive_name,
     homebrew_cask_name,
+    *standalone_binary_names,
 }:
     fail("release manifest asset set differs from the inventory")
 
@@ -145,7 +154,6 @@ if app_manifest != {
 }:
     fail("app manifest entry differs from the inventory or archive digest")
 
-cli_products = [product for product in products if product["classification"] == "cli"]
 expected_cli_products = [
     {"name": product["name"], "path": product["archivePath"]}
     for product in cli_products
@@ -164,6 +172,22 @@ if cli_manifest != {
     "products": expected_cli_products,
 }:
     fail("CLI manifest entry differs from the inventory or archive digest")
+
+for product in cli_products:
+    name = product["name"]
+    standalone_manifest = manifest_assets[name]
+    require_exact_keys(
+        standalone_manifest,
+        {"name", "sha256", "kind", "product"},
+        f"standalone CLI asset {name}",
+    )
+    if standalone_manifest != {
+        "name": name,
+        "sha256": checksums[name],
+        "kind": "cli-binary",
+        "product": name,
+    }:
+        fail(f"standalone CLI manifest entry differs from the inventory or digest: {name}")
 
 homebrew_cask_manifest = manifest_assets[homebrew_cask_name]
 require_exact_keys(
@@ -312,6 +336,8 @@ with tempfile.TemporaryDirectory(prefix="dopa-published-release.") as temporary_
 
     cli_extract = temporary / "cli"
     cli_extract.mkdir()
+    standalone_extract = temporary / "standalone"
+    standalone_extract.mkdir()
     with tarfile.open(cli_archive_path, "r:gz") as archive:
         for member in archive.getmembers():
             destination = cli_extract / PurePosixPath(member.name)
@@ -332,6 +358,30 @@ with tempfile.TemporaryDirectory(prefix="dopa-published-release.") as temporary_
             fail(f"CLI archive product is not executable: {product['name']}")
         if sha256(app_product) != sha256(cli_product):
             fail(f"CLI archive binary differs from the app helper: {product['name']}")
+        standalone_asset = asset_directory / product["name"]
+        if not standalone_asset.is_file() or standalone_asset.is_symlink():
+            fail(f"standalone CLI asset is not a regular file: {product['name']}")
+        if sha256(standalone_asset) != sha256(cli_product):
+            fail(f"standalone CLI binary differs from the CLI archive: {product['name']}")
+        standalone_product = standalone_extract / product["name"]
+        shutil.copyfile(standalone_asset, standalone_product)
+        standalone_product.chmod(0o755)
+        try:
+            architectures = subprocess.check_output(
+                ["xcrun", "lipo", "-archs", str(standalone_product)],
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=30,
+            ).strip()
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            fail(f"cannot inspect standalone CLI architecture for {product['name']}: {error}")
+        if architectures != "arm64":
+            fail(f"standalone CLI asset is not thin arm64: {product['name']}")
+        validate_ad_hoc_signature(standalone_product, f"standalone {product['name']}")
+        run_checked(
+            [str(standalone_product), "--help"],
+            f"standalone {product['name']} --help",
+        )
         validate_ad_hoc_signature(cli_product, f"CLI archive {product['name']}")
         run_checked(
             [str(cli_product), "--help"],

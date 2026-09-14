@@ -82,10 +82,16 @@ workflow 側に別の添付リストを増やしてはいけません。
 現在の配布物は次のとおりです。
 
 - `Dopa-macos-arm64.zip`: `Dopa.app`。app 内に `dopa` と `dopa-daemon` を含む
+- `dopa`: 単体でダウンロードできるCLI実行ファイル
+- `dopa-daemon`: 単体でダウンロードできるdaemon実行ファイル
 - `dopa-macos-arm64.tar.gz`: CLI、daemon、shell completion、利用時に必要な文書
 - `dopa.rb`: app archiveのSHA-256と全CLI・shell completion・未notarized警告を含むCask
 - `release-manifest.json`: version、構成要素、archive の SHA-256
 - `SHA256SUMS`: 上記の検証用 checksum
+
+GitHub Releaseから単体実行ファイルを直接ダウンロードした場合は、checksumを確認してから
+`chmod +x dopa dopa-daemon` で実行権を付けます。package処理はこの2ファイルがapp内helperと
+CLI archive内の実体に一致することも検証します。
 
 変更後は最低でも次を実行します。
 
