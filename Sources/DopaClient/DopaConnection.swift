@@ -116,7 +116,7 @@ public final class DopaConnection {
           "apiVersion": .number(Double(DopaProtocol.apiVersion)),
           "client": .object([
             "name": .string(clientName),
-            "version": .string(DopaProtocol.clientVersion),
+            "version": .string(DopaProtocol.appVersion),
           ]),
         ]),
         timeout: 5

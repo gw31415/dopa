@@ -504,7 +504,7 @@ final class DaemonEngine {
         peer.name = name
         peer.hello = true
         result = .object([
-          "apiVersion": .number(1), "daemonVersion": .string(DopaProtocol.clientVersion),
+          "apiVersion": .number(1), "daemonVersion": .string(DopaProtocol.appVersion),
           "instanceId": .string(instanceID),
           "capabilities": .array([
             .string("status.subscribe"), .string("session.update"),

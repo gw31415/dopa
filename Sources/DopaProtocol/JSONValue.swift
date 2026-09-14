@@ -2,7 +2,6 @@ import Foundation
 
 public enum DopaProtocol {
   public static let apiVersion = 1
-  public static let clientVersion = "0.2.1"
 }
 
 /// The JSON value types accepted by the Dopa wire protocol.

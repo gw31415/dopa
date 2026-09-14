@@ -4,6 +4,19 @@ import XCTest
 @testable import DopaProtocol
 
 final class JSONWireTests: XCTestCase {
+  func testAppVersionMatchesInfoPlist() throws {
+    let repositoryRoot = URL(fileURLWithPath: #filePath)
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+    let data = try Data(contentsOf: repositoryRoot.appendingPathComponent("Resources/Dopa-Info.plist"))
+    let plist = try XCTUnwrap(
+      PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
+    let bundleVersion = try XCTUnwrap(plist["CFBundleShortVersionString"] as? String)
+
+    XCTAssertEqual(DopaProtocol.appVersion, bundleVersion)
+  }
+
   func testRoundTripAndDeterministicObjectEncoding() throws {
     let value: JSONValue = .object([
       "message": .string("hello\n世界"),

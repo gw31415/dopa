@@ -493,6 +493,15 @@ final class DaemonServiceTests: XCTestCase {
       XCTAssertEqual(unsupported["error"]?["code"], .string("unsupported_version"))
       XCTAssertEqual(unsupported["error"]?["details"]?["supportedVersions"], .array([.number(1)]))
       XCTAssertTrue(one.closing)
+      let compatible = peer()
+      compatible.hello = false
+      let hello = call(
+        engine, compatible, "hello",
+        .object([
+          "apiVersion": .number(1),
+          "client": .object(["name": .string("test"), "version": .string("1")]),
+        ]))
+      XCTAssertEqual(hello["result"]?["daemonVersion"], .string(DopaProtocol.appVersion))
       let two = peer()
       XCTAssertEqual(
         call(

@@ -18,7 +18,9 @@ let package = Package(
     .target(
       name: "DopaLid",
       linkerSettings: [.linkedFramework("IOKit"), .linkedFramework("CoreFoundation")]),
-    .target(name: "DopaProtocol"),
+    .target(
+      name: "DopaProtocol",
+      plugins: [.plugin(name: "GenerateVersionPlugin")]),
     .target(name: "DopaClient", dependencies: ["DopaProtocol"]),
     .target(name: "DopaAuthorization", linkerSettings: [.linkedFramework("Security")]),
     .target(name: "DopaCore", dependencies: ["CDopa", "DopaProtocol", "DopaAuthorization"]),
@@ -44,5 +46,11 @@ let package = Package(
     .testTarget(name: "DopaAuthorizationTests", dependencies: ["DopaAuthorization"]),
     .testTarget(name: "DopaManagementTests", dependencies: ["DopaManagement", "DopaProtocol"]),
     .testTarget(name: "DopaCLITests", dependencies: ["DopaCLI", "DopaDaemonCLI"]),
+    .executableTarget(name: "VersionGenerator", path: "Plugins/VersionGenerator"),
+    .plugin(
+      name: "GenerateVersionPlugin",
+      capability: .buildTool(),
+      dependencies: ["VersionGenerator"],
+      path: "Plugins/GenerateVersionPlugin"),
   ]
 )
