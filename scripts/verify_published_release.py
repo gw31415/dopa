@@ -22,7 +22,7 @@ if len(sys.argv) != 3:
     fail("usage: verify_published_release.py vX.Y.Z ASSET_DIRECTORY")
 
 tag = sys.argv[1]
-if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag):
+if not re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag):
     fail(f"invalid release tag: {tag!r}")
 version = tag[1:]
 root = Path(__file__).resolve().parent.parent
@@ -56,14 +56,23 @@ try:
     bundle_name = config["bundleName"]
     app_archive_name = config["appArchive"]
     cli_archive_name = config["cliArchive"]
+    homebrew_cask_name = config["homebrewCask"]
+    distribution = config["macOSDistribution"]
     products = config["products"]
     cli_archive_files = config["cliArchiveFiles"]
 except (KeyError, TypeError) as error:
     fail(f"release inventory is missing {error}")
+if distribution != {
+    "signature": "ad-hoc",
+    "hardenedRuntime": True,
+    "notarized": False,
+}:
+    fail("release inventory must require ad-hoc signing, hardened runtime, and no notarization")
 
 expected_asset_names = {
     app_archive_name,
     cli_archive_name,
+    homebrew_cask_name,
     "release-manifest.json",
     "SHA256SUMS",
 }
@@ -74,7 +83,12 @@ if actual_asset_names != expected_asset_names:
         f"(expected={sorted(expected_asset_names)}, actual={sorted(actual_asset_names)})"
     )
 
-checksum_names = {app_archive_name, cli_archive_name, "release-manifest.json"}
+checksum_names = {
+    app_archive_name,
+    cli_archive_name,
+    homebrew_cask_name,
+    "release-manifest.json",
+}
 checksums = {}
 try:
     checksum_lines = (asset_directory / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
@@ -94,20 +108,26 @@ for name, expected_digest in checksums.items():
 manifest = load_json(asset_directory / "release-manifest.json", "release manifest")
 require_exact_keys(
     manifest,
-    {"schemaVersion", "version", "tag", "target", "assets"},
+    {"schemaVersion", "version", "tag", "target", "distribution", "assets"},
     "release manifest",
 )
 if manifest["schemaVersion"] != 1 or manifest["tag"] != tag or manifest["version"] != version:
     fail("release manifest version or tag does not match the requested release")
 if manifest["target"] != {"os": "macOS", "architecture": "arm64"}:
     fail("release manifest target is not macOS arm64")
+if manifest["distribution"] != distribution:
+    fail("release manifest distribution policy differs from the inventory")
 if not isinstance(manifest["assets"], list):
     fail("release manifest assets must be an array")
 try:
     manifest_assets = {asset["name"]: asset for asset in manifest["assets"]}
 except (KeyError, TypeError):
     fail("release manifest contains an invalid asset")
-if len(manifest_assets) != 2 or set(manifest_assets) != {app_archive_name, cli_archive_name}:
+if len(manifest_assets) != 3 or set(manifest_assets) != {
+    app_archive_name,
+    cli_archive_name,
+    homebrew_cask_name,
+}:
     fail("release manifest asset set differs from the inventory")
 
 expected_app_products = [
@@ -144,6 +164,21 @@ if cli_manifest != {
     "products": expected_cli_products,
 }:
     fail("CLI manifest entry differs from the inventory or archive digest")
+
+homebrew_cask_manifest = manifest_assets[homebrew_cask_name]
+require_exact_keys(
+    homebrew_cask_manifest,
+    {"name", "sha256", "kind", "token", "appArchive"},
+    "Homebrew Cask asset",
+)
+if homebrew_cask_manifest != {
+    "name": homebrew_cask_name,
+    "sha256": checksums[homebrew_cask_name],
+    "kind": "homebrew-cask",
+    "token": "dopa",
+    "appArchive": app_archive_name,
+}:
+    fail("Homebrew Cask manifest entry differs from the inventory or archive digest")
 
 
 def safe_member_path(name: str, description: str) -> PurePosixPath:
@@ -205,7 +240,7 @@ def run_checked(arguments: list[str], description: str) -> None:
         fail(f"{description} failed{detail}")
 
 
-def validate_distribution_signature(path: Path, name: str) -> None:
+def validate_ad_hoc_signature(path: Path, name: str) -> None:
     run_checked(["codesign", "--verify", "--strict", str(path)], f"signature verification for {name}")
     try:
         details = subprocess.check_output(
@@ -215,15 +250,30 @@ def validate_distribution_signature(path: Path, name: str) -> None:
             timeout=30,
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-        fail(f"cannot inspect distribution signature for {name}: {error}")
-    if "Authority=Developer ID Application:" not in details:
-        fail(f"{name} is not signed with a Developer ID Application identity")
-    if "(runtime)" not in details or "Timestamp=" not in details:
-        fail(f"{name} lacks hardened runtime or a secure timestamp")
+        fail(f"cannot inspect ad-hoc signature for {name}: {error}")
+    if "Signature=adhoc" not in details or "Authority=" in details:
+        fail(f"{name} must use an ad-hoc signature without a signing identity")
+    if not re.search(r"flags=0x[0-9a-f]+\([^)]*runtime[^)]*\)", details):
+        fail(f"{name} does not enable the hardened runtime")
 
 
 with tempfile.TemporaryDirectory(prefix="dopa-published-release.") as temporary_value:
     temporary = Path(temporary_value)
+    expected_cask = temporary / "expected-dopa.rb"
+    run_checked(
+        [
+            str(root / "scripts" / "render-homebrew-cask.sh"),
+            version,
+            checksums[app_archive_name],
+            str(expected_cask),
+        ],
+        "Homebrew Cask regeneration",
+    )
+    published_cask = asset_directory / homebrew_cask_name
+    if expected_cask.read_bytes() != published_cask.read_bytes():
+        fail("published Homebrew Cask differs from the release inventory and app checksum")
+    run_checked(["ruby", "-c", str(published_cask)], "Homebrew Cask syntax validation")
+
     app_extract = temporary / "app"
     app_extract.mkdir()
     run_checked(["ditto", "-x", "-k", str(app_archive_path), str(app_extract)], "app extraction")
@@ -242,12 +292,7 @@ with tempfile.TemporaryDirectory(prefix="dopa-published-release.") as temporary_
         ["codesign", "--verify", "--deep", "--strict", str(app_bundle)],
         "app deep signature verification",
     )
-    validate_distribution_signature(app_bundle, bundle_name)
-    run_checked(["xcrun", "stapler", "validate", str(app_bundle)], "notary ticket validation")
-    run_checked(
-        ["spctl", "--assess", "--type", "execute", "--verbose=4", str(app_bundle)],
-        "Gatekeeper assessment",
-    )
+    validate_ad_hoc_signature(app_bundle, bundle_name)
     for product in products:
         product_path = app_bundle / PurePosixPath(product["bundlePath"])
         if not product_path.is_file() or product_path.is_symlink() or not os.access(product_path, os.X_OK):
@@ -263,7 +308,7 @@ with tempfile.TemporaryDirectory(prefix="dopa-published-release.") as temporary_
             fail(f"cannot inspect architecture for {product['name']}: {error}")
         if architectures != "arm64":
             fail(f"archived product is not thin arm64: {product['name']}")
-        validate_distribution_signature(product_path, product["name"])
+        validate_ad_hoc_signature(product_path, product["name"])
 
     cli_extract = temporary / "cli"
     cli_extract.mkdir()
@@ -287,10 +332,22 @@ with tempfile.TemporaryDirectory(prefix="dopa-published-release.") as temporary_
             fail(f"CLI archive product is not executable: {product['name']}")
         if sha256(app_product) != sha256(cli_product):
             fail(f"CLI archive binary differs from the app helper: {product['name']}")
-        validate_distribution_signature(cli_product, f"CLI archive {product['name']}")
+        validate_ad_hoc_signature(cli_product, f"CLI archive {product['name']}")
         run_checked(
             [str(cli_product), "--help"],
             f"CLI archive {product['name']} --help",
         )
+    for entry in cli_archive_files:
+        archive_path = entry["archivePath"]
+        if not archive_path.startswith("completions/"):
+            continue
+        cli_completion = cli_extract / PurePosixPath(archive_path)
+        app_completion = app_bundle / "Contents" / "Resources" / PurePosixPath(
+            archive_path
+        )
+        if not app_completion.is_file() or app_completion.is_symlink():
+            fail(f"app archive is missing shell completion: {archive_path}")
+        if sha256(app_completion) != sha256(cli_completion):
+            fail(f"app and CLI shell completions differ: {archive_path}")
 
-print(f"Verified immutable published assets for {tag}")
+print(f"Verified complete published assets for {tag}")

@@ -23,9 +23,17 @@ except (OSError, UnicodeError, json.JSONDecodeError) as error:
 try:
     bundle_name = config["bundleName"]
     app_archive = config["appArchive"]
+    distribution = config["macOSDistribution"]
     products = config["products"]
+    cli_archive_files = config["cliArchiveFiles"]
 except (KeyError, TypeError) as error:
     fail(f"release inventory is missing {error}")
+if distribution != {
+    "signature": "ad-hoc",
+    "hardenedRuntime": True,
+    "notarized": False,
+}:
+    fail("macOSDistribution must be ad-hoc with hardened runtime and no notarization")
 
 for value, suffix, description in (
     (bundle_name, ".app", "bundleName"),
@@ -57,6 +65,26 @@ for product in products:
 if not cli_products:
     fail("release inventory does not contain a CLI product")
 
+if not isinstance(cli_archive_files, list):
+    fail("cliArchiveFiles must be an array")
+archive_files = set()
+for entry in cli_archive_files:
+    if not isinstance(entry, dict) or not isinstance(entry.get("archivePath"), str):
+        fail("cliArchiveFiles entries must contain an archivePath")
+    archive_files.add(entry["archivePath"])
+
+completion_paths = []
+for name, _ in cli_products:
+    for shell, extension, target in (
+        ("bash", "bash", name),
+        ("fish", "fish", None),
+        ("zsh", "zsh", f"_{name}"),
+    ):
+        archive_path = f"completions/{name}.{extension}"
+        if archive_path not in archive_files:
+            fail(f"release inventory is missing {shell} completion for {name}")
+        completion_paths.append((shell, archive_path, target))
+
 lines = [
     'cask "dopa" do',
     f'  version "{version}"',
@@ -79,7 +107,32 @@ for name, bundle_path in cli_products:
         lines.append(f'  binary "{source}"')
     else:
         lines.append(f'  binary "{source}", target: "{name}"')
-lines.extend(["", "end", ""])
+for shell, archive_path, target in completion_paths:
+    source = f"#{{appdir}}/{bundle_name}/Contents/Resources/{archive_path}"
+    if target is None:
+        lines.append(f'  {shell}_completion "{source}"')
+    else:
+        lines.append(f'  {shell}_completion "{source}", target: "{target}"')
+lines.extend(
+    [
+        "",
+        "  caveats <<~EOS",
+        "    Dopa is ad-hoc signed without a Developer ID and is not notarized by Apple.",
+        "    macOS may block it after installation or upgrade.",
+        "",
+        "    After trying to open Dopa once, allow it in:",
+        "      System Settings > Privacy & Security > Open Anyway",
+        "",
+        "    Or, only if you trust this release, remove quarantine from Dopa alone:",
+        f'      xattr -dr com.apple.quarantine "#{{appdir}}/{bundle_name}"',
+        f'      open "#{{appdir}}/{bundle_name}"',
+        "",
+        "    Do not use a wildcard: removing quarantine bypasses Apple's malware check.",
+        "  EOS",
+        "end",
+        "",
+    ]
+)
 cask = "\n".join(lines)
 if output:
     destination = Path(output)

@@ -41,6 +41,14 @@ launchd ──┴─ 起動・再起動
 
 Dopa.appからのdaemon導入・起動は、制御端末を持つ `/usr/bin/sudo -k` に委譲し、端末の `/etc/pam.d/sudo` に構成されたPAMスタックとsudoersをそのまま利用する。Touch IDやApple WatchなどPAMモジュール自身のUIを優先し、PAMがターミナル文字入力を要求した場合はポリシーを別の認可経路で迂回せず操作を中止して、同梱daemonをTerminalから `sudo` で実行するよう案内する。DopaはPAM・sudoers・Authorization Databaseを書き換えず、管理者パスワードを自身で読み取り・保存・ログ出力しない。これは別UIDのセッション停止に用いるAuthorization Servicesの短期ExternalFormとは別の認可経路である。
 
+### 公開配布とHomebrew tap
+
+`release/artifacts.json`を公開物の唯一のinventoryとし、GitHub ReleaseにApp、CLI、shell completion、Cask、manifest、checksumを公開する。ビルド、署名検査、archive間の同一性、公開assetの再download、Caskの生成、Homebrewによる実インストール、quarantine、CLI、App起動、uninstallまでを`dopa`のRelease workflowで検証する。この検証jobは`id-token`権限を持たない。`homebrew-tap`はCaskを保持して人間がmergeする公開indexであり、ビルド、検証、GitHub Actions、runner、repository secretを持たない。
+
+stable releaseの検証後に限り、Release workflowは新しいrunnerのpublication jobを開始し、`homebrew-release` environmentからGitHub Actions OIDC tokenを取得する。検証jobからはCask本文とSHA-256だけを受け取り、source checkout、tap script、release binaryを実行しない。`homebrew-tap`だけにinstallしたOcto STS GitHub Appが、tapのdefault branchに置いたtrust policyとOIDC claimを照合し、Contents、Pull requests、Commit statusesだけをwrite可能にした短命installation tokenへ交換する。PAT、deploy key、App private keyをリポジトリへ保存しない。強いtokenは検証済みCaskのpush、head SHAへの`dopa/release-verified` status、PR作成にだけ使う。
+
+tapの`main`は直接更新せず、1本のautomation branchとPRを最新版へ更新する。PRは1件の人間によるapprovalと、Octo STS Appを発行元とする`dopa/release-verified`を要求し、App自身には保護ルールのbypassを与えない。workflowはauto-mergeを予約するため、所有者のapprovalが公開判断となる。個人repositoryの所有者だけは初回bootstrapと手動保守のbreak-glassとしてadmin bypassを保持し、通常のrelease経路では使わない。新しいpushでは古いapprovalを失効させる。OIDC交換、tapへのpush、status、PR作成のいずれかが失敗しても公開済みRelease assetは変更せず、tapの`main`も更新しない。同じRelease workflowの再実行を冪等な復旧経路とする。
+
 ## コマンド
 
 ```sh
@@ -229,7 +237,7 @@ subscribe / unsubscribe は冪等。unsubscribe 応答後は新しい status.cha
 
 起動や再接続では監視だけを開始し、スリープ防止を自動取得しない。UIの閉蓋トグルが有効な間はUI自身が蓋を監視し、閉蓋時に自分の `session.release` を送る。ソケットはMainActor外の専用queueに閉じ込め、操作応答とsnapshotで確認済み状態を更新する。instanceIdをまたいで所有情報を持ち越さず、revisionを十進文字列のまま比較する。切断・degraded・confirmed不一致を「オフ」と表示しない。終了時は進行中のdaemon管理認証をキャンセルして子プロセスの回収を待ち、自分のセッションの解除を試み、他接続を停止しない。
 
-UIバンドルはローカル実行用にはad-hoc署名で生成し、公開リリースではGitHub ActionsがDeveloper ID署名、hardened runtime、secure timestamp、notarization、ticketのstapleを行う。ログイン時自動起動の登録は別の配布作業とする。通常ビルドはroot所有ソケット・サーバーだけに接続する。UI受入れの専用コンパイルでは模擬電源の一時ソケットとダミー認可を明示注入できるが、この切り替えは製品ビルドに含めない。
+UIバンドルはローカル実行用・公開リリースともhardened runtimeを有効にしたad-hoc署名で生成し、Developer ID署名とnotarizationは行わない。公開物は通常のquarantineを維持し、利用者が出所を確認した上で「プライバシーとセキュリティ」または対象appだけへの`xattr`で明示的に実行を許可する。ログイン時自動起動の登録は別の配布作業とする。通常ビルドはroot所有ソケット・サーバーだけに接続する。UI受入れの専用コンパイルでは模擬電源の一時ソケットとダミー認可を明示注入できるが、この切り替えは製品ビルドに含めない。
 
 ## 検証すべき契約
 

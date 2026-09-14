@@ -7,6 +7,7 @@ ROOT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 BUILD_ROOT="${ROOT_DIR}/.build"
 INFO_PLIST_SOURCE="${ROOT_DIR}/Resources/Dopa-Info.plist"
 ICON_SOURCE="${ROOT_DIR}/Resources/Dopa.icon"
+COMPLETIONS_SOURCE="${ROOT_DIR}/completions"
 
 usage() {
   cat <<'EOF'
@@ -39,6 +40,7 @@ esac
 
 [[ -f "${INFO_PLIST_SOURCE}" ]] || die "missing ${INFO_PLIST_SOURCE}"
 [[ -d "${ICON_SOURCE}" ]] || die "missing ${ICON_SOURCE}"
+[[ -d "${COMPLETIONS_SOURCE}" ]] || die "missing ${COMPLETIONS_SOURCE}"
 
 ACTOOL_BIN="$(xcrun --sdk macosx --find actool 2>/dev/null || true)"
 [[ -n "${ACTOOL_BIN}" ]] || die "actool is required to compile ${ICON_SOURCE}"
@@ -72,39 +74,11 @@ else
 fi
 swift_build_args+=(--scratch-path "${SCRATCH_PATH}")
 
-# Local and UI-fixture builds remain ad-hoc signed. A distribution build can
-# opt into a Developer ID Application identity without changing the normal
-# developer workflow. Keep every user-controlled value in an array and reject
-# option-looking/control-character values before passing it to codesign.
-CODESIGN_IDENTITY=-
-CODESIGN_KEYCHAIN_ARGS=()
-CODESIGN_HARDENED_ARGS=()
-validate_codesign_value() {
-  local label="$1"
-  local value="$2"
-  [[ -n "${value}" ]] || die "${label} must not be empty"
-  [[ "${value}" != -* ]] || die "${label} must not start with '-'"
-  case "${value}" in
-    *$'\n'*|*$'\r'*|*$'\t'*) die "${label} contains a control character" ;;
-  esac
-}
-if (( ! fixture )) && [[ "${DOPA_CODESIGN_IDENTITY+x}" == x ]]; then
-  validate_codesign_value DOPA_CODESIGN_IDENTITY "${DOPA_CODESIGN_IDENTITY}"
-  CODESIGN_IDENTITY="${DOPA_CODESIGN_IDENTITY}"
-  CODESIGN_HARDENED_ARGS=(--options runtime --timestamp)
-  if [[ "${DOPA_CODESIGN_KEYCHAIN+x}" == x ]]; then
-    validate_codesign_value DOPA_CODESIGN_KEYCHAIN "${DOPA_CODESIGN_KEYCHAIN}"
-    CODESIGN_KEYCHAIN_ARGS=(--keychain "${DOPA_CODESIGN_KEYCHAIN}")
-  fi
-elif (( ! fixture )) && [[ "${DOPA_CODESIGN_KEYCHAIN+x}" == x ]]; then
-  die "DOPA_CODESIGN_KEYCHAIN requires DOPA_CODESIGN_IDENTITY"
-fi
-CODESIGN_ARGS=(
-  --force
-  --sign "${CODESIGN_IDENTITY}"
-  "${CODESIGN_KEYCHAIN_ARGS[@]}"
-  "${CODESIGN_HARDENED_ARGS[@]}"
-)
+# Apple Silicon executables still need a structurally valid code signature.
+# Use ad-hoc signing for both local and public builds: it needs no paid Apple
+# Developer identity. Hardened runtime remains available without an identity,
+# while macOS still requires explicit approval for a quarantined download.
+CODESIGN_ARGS=(--force --sign - --options runtime)
 
 # Serialise each destination bundle for the whole build. Without this lock,
 # concurrent invocations can both remove/replace the same final path and one
@@ -167,6 +141,15 @@ INFO_PLIST_PATH="${CONTENTS_PATH}/Info.plist"
 
 mkdir -p "${MACOS_PATH}" "${RESOURCES_PATH}"
 install -m 0755 "${BIN_DIR}/dopa-ui" "${MACOS_PATH}/dopa-ui"
+COMPLETIONS_PATH="${RESOURCES_PATH}/completions"
+mkdir -p "${COMPLETIONS_PATH}"
+for completion in \
+  dopa.bash dopa.fish dopa.zsh \
+  dopa-daemon.bash dopa-daemon.fish dopa-daemon.zsh; do
+  [[ -f "${COMPLETIONS_SOURCE}/${completion}" ]] \
+    || die "missing shell completion ${COMPLETIONS_SOURCE}/${completion}"
+  install -m 0644 "${COMPLETIONS_SOURCE}/${completion}" "${COMPLETIONS_PATH}/${completion}"
+done
 if (( ! fixture )); then
   mkdir -p "${HELPERS_PATH}"
   for helper in dopa dopa-daemon; do
@@ -225,10 +208,9 @@ plutil -lint "${INFO_PLIST_PATH}" >/dev/null
 [[ "$(plutil -extract LSUIElement raw -o - "${INFO_PLIST_PATH}")" == true ]] \
   || die "LSUIElement must be true"
 
-# Sign the main executable before the enclosing bundle so a configured
-# Developer ID identity gets hardened-runtime and secure-timestamp settings
-# on both code objects. The final bundle signature then records these nested
-# signatures and remains compatible with the existing verification below.
+# Sign the main executable before the enclosing bundle so every Mach-O has an
+# explicit ad-hoc signature. The final bundle signature records these nested
+# signatures and remains compatible with the verification below.
 codesign "${CODESIGN_ARGS[@]}" "${MACOS_PATH}/dopa-ui" >/dev/null
 codesign "${CODESIGN_ARGS[@]}" "${STAGING_APP_PATH}" >/dev/null
 codesign --verify --deep --strict --verbose=2 "${STAGING_APP_PATH}" >/dev/null

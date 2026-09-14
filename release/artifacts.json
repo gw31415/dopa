@@ -3,6 +3,12 @@
   "bundleName": "Dopa.app",
   "appArchive": "Dopa-macos-arm64.zip",
   "cliArchive": "dopa-macos-arm64.tar.gz",
+  "homebrewCask": "dopa.rb",
+  "macOSDistribution": {
+    "signature": "ad-hoc",
+    "hardenedRuntime": true,
+    "notarized": false
+  },
   "products": [
     {
       "name": "dopa",

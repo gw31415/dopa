@@ -24,7 +24,8 @@ TEST_SOURCES := $(wildcard Tests/*/*.swift)
 APP_RESOURCES := \
 	Resources/Dopa-Info.plist \
 	Resources/Dopa.icon/icon.json \
-	$(wildcard Resources/Dopa.icon/Assets/*.svg)
+	$(wildcard Resources/Dopa.icon/Assets/*.svg) \
+	$(wildcard completions/*)
 
 .PHONY: build app test release-check check FORCE
 

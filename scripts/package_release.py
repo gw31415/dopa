@@ -18,10 +18,6 @@ package_path = Path(sys.argv[3]).resolve()
 mode = sys.argv[4]
 tag = sys.argv[5]
 temporary = Path(sys.argv[6]).resolve()
-notarization_setting = os.environ.get("DOPA_REQUIRE_NOTARIZATION", "0")
-if notarization_setting not in ("0", "1"):
-    raise SystemExit("package-release: DOPA_REQUIRE_NOTARIZATION must be 0 or 1")
-require_notarization = notarization_setting == "1"
 
 
 def fail(message: str) -> None:
@@ -73,6 +69,8 @@ require_keys(
         "bundleName",
         "appArchive",
         "cliArchive",
+        "homebrewCask",
+        "macOSDistribution",
         "products",
         "cliArchiveFiles",
     },
@@ -84,9 +82,17 @@ if config["schemaVersion"] != 1:
 bundle_name = safe_filename(config["bundleName"], ".app", "bundleName")
 app_archive = safe_filename(config["appArchive"], ".zip", "appArchive")
 cli_archive = safe_filename(config["cliArchive"], ".tar.gz", "cliArchive")
+homebrew_cask = safe_filename(config["homebrewCask"], ".rb", "homebrewCask")
 reserved_assets = {"release-manifest.json", "SHA256SUMS"}
-if len({app_archive, cli_archive} | reserved_assets) != 4:
+if len({app_archive, cli_archive, homebrew_cask} | reserved_assets) != 5:
     fail("release asset names must be distinct and must not use reserved names")
+distribution = config["macOSDistribution"]
+if distribution != {
+    "signature": "ad-hoc",
+    "hardenedRuntime": True,
+    "notarized": False,
+}:
+    fail("macOSDistribution must require ad-hoc signing, hardened runtime, and no notarization")
 
 products = config["products"]
 if not isinstance(products, list) or not products:
@@ -205,7 +211,7 @@ print(
 if mode == "check":
     raise SystemExit(0)
 
-if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag):
+if not re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag):
     fail(f"release tag must have the form vX.Y.Z: {tag!r}")
 version = tag[1:]
 if source_version != version:
@@ -244,7 +250,8 @@ def run_checked(arguments: list[str], description: str) -> None:
         fail(f"{description} failed{detail}")
 
 
-def validate_distribution_signature(path: Path, name: str) -> None:
+def validate_ad_hoc_signature(path: Path, name: str) -> None:
+    run_checked(["codesign", "--verify", "--strict", str(path)], f"codesign verification for {name}")
     try:
         details = subprocess.check_output(
             ["codesign", "-dvvv", str(path)],
@@ -253,13 +260,11 @@ def validate_distribution_signature(path: Path, name: str) -> None:
             timeout=30,
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-        fail(f"cannot inspect distribution signature for {name}: {error}")
-    if "Authority=Developer ID Application:" not in details:
-        fail(f"{name} is not signed with a Developer ID Application identity")
+        fail(f"cannot inspect ad-hoc signature for {name}: {error}")
+    if "Signature=adhoc" not in details or "Authority=" in details:
+        fail(f"{name} must use an ad-hoc signature without a signing identity")
     if not re.search(r"flags=0x[0-9a-f]+\([^)]*runtime[^)]*\)", details):
         fail(f"{name} does not enable the hardened runtime")
-    if "Timestamp=" not in details:
-        fail(f"{name} does not have a secure signing timestamp")
 
 
 def validate_binary(path: Path, name: str, run_help: bool) -> None:
@@ -276,28 +281,16 @@ def validate_binary(path: Path, name: str, run_help: bool) -> None:
         fail(f"cannot inspect architecture for {name}: {error}")
     if architectures != "arm64":
         fail(f"{name} must be a thin arm64 Mach-O, found: {architectures!r}")
-    run_checked(["codesign", "--verify", "--strict", str(path)], f"codesign verification for {name}")
-    if require_notarization:
-        validate_distribution_signature(path, name)
+    validate_ad_hoc_signature(path, name)
     if run_help:
         run_checked([str(path), "--help"], f"{name} --help")
-
-
-def validate_notarized_app(path: Path, name: str) -> None:
-    validate_distribution_signature(path, name)
-    run_checked(["xcrun", "stapler", "validate", str(path)], f"notary ticket validation for {name}")
-    run_checked(
-        ["spctl", "--assess", "--type", "execute", "--verbose=4", str(path)],
-        f"Gatekeeper assessment for {name}",
-    )
 
 
 run_checked(
     ["codesign", "--verify", "--deep", "--strict", str(app_bundle)],
     "app codesign verification",
 )
-if require_notarization:
-    validate_notarized_app(app_bundle, bundle_name)
+validate_ad_hoc_signature(app_bundle, bundle_name)
 product_sources: dict[str, Path] = {}
 for product in normalized_products:
     source = app_bundle / PurePosixPath(product["bundlePath"])
@@ -384,15 +377,42 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+for entry in normalized_files:
+    if not entry["archivePath"].startswith("completions/"):
+        continue
+    app_completion = app_bundle / "Contents" / "Resources" / PurePosixPath(
+        entry["archivePath"]
+    )
+    if not app_completion.is_file() or app_completion.is_symlink():
+        fail(f"app bundle is missing shell completion: {entry['archivePath']}")
+    if sha256(app_completion) != sha256(entry["path"]):
+        fail(f"app shell completion differs from its source: {entry['archivePath']}")
+
+
+app_archive_sha256 = sha256(app_archive_path)
+homebrew_cask_path = dist / homebrew_cask
+run_checked(
+    [
+        str(root / "scripts" / "render-homebrew-cask.sh"),
+        version,
+        app_archive_sha256,
+        str(homebrew_cask_path),
+    ],
+    "Homebrew Cask creation",
+)
+run_checked(["ruby", "-c", str(homebrew_cask_path)], "Homebrew Cask syntax validation")
+
+
 manifest = {
     "schemaVersion": 1,
     "version": version,
     "tag": tag,
     "target": {"os": "macOS", "architecture": "arm64"},
+    "distribution": distribution,
     "assets": [
         {
             "name": app_archive,
-            "sha256": sha256(app_archive_path),
+            "sha256": app_archive_sha256,
             "kind": "app",
             "bundle": bundle_name,
             "products": [
@@ -417,6 +437,13 @@ manifest = {
                 if product["classification"] == "cli"
             ],
         },
+        {
+            "name": homebrew_cask,
+            "sha256": sha256(homebrew_cask_path),
+            "kind": "homebrew-cask",
+            "token": "dopa",
+            "appArchive": app_archive,
+        },
     ],
 }
 manifest_path = dist / "release-manifest.json"
@@ -425,7 +452,7 @@ manifest_path.write_text(
     encoding="utf-8",
 )
 
-checksummed = [app_archive_path, cli_archive_path, manifest_path]
+checksummed = [app_archive_path, cli_archive_path, homebrew_cask_path, manifest_path]
 checksums_path = dist / "SHA256SUMS"
 checksums_path.write_text(
     "".join(
@@ -445,8 +472,7 @@ run_checked(
     ["codesign", "--verify", "--deep", "--strict", str(extracted_app)],
     "archived app codesign verification",
 )
-if require_notarization:
-    validate_notarized_app(extracted_app, f"archived {bundle_name}")
+validate_ad_hoc_signature(extracted_app, f"archived {bundle_name}")
 for product in normalized_products:
     extracted = extracted_app / PurePosixPath(product["bundlePath"])
     validate_binary(extracted, f"archived {product['name']}", False)
@@ -467,7 +493,13 @@ for product in normalized_products:
         True,
     )
 
-expected_assets = {app_archive, cli_archive, "release-manifest.json", "SHA256SUMS"}
+expected_assets = {
+    app_archive,
+    cli_archive,
+    homebrew_cask,
+    "release-manifest.json",
+    "SHA256SUMS",
+}
 actual_assets = {path.name for path in dist.iterdir() if path.is_file()}
 if actual_assets != expected_assets:
     fail(f"unexpected generated asset set: {sorted(actual_assets)}")

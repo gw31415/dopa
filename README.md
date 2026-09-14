@@ -37,9 +37,39 @@
 brew install --cask gw31415/tap/dopa
 ```
 
+インストール完了時に、未notarizedアプリであることと初回起動の許可手順が表示されます。
+
 ### 手動インストール
 
 Homebrewを使用しない場合は、[最新のダウンロードページ](https://github.com/gw31415/dopa/releases/latest)から入手できます。
+
+### 初回起動の許可
+
+> [!WARNING]
+> DopaはApple Developer Programを使わないad-hoc署名で配布しており、Appleの
+> notarizationを受けていません。以下の操作は、GitHub Releaseの出所とSHA-256を
+> 確認し、Dopaを信頼できる場合にだけ行ってください。
+
+最初にDopaを一度開こうとした後、「システム設定」→「プライバシーとセキュリティ」
+に表示されるDopaの「このまま開く」を選択できます。ターミナルで明示的に許可する場合は、
+対象をDopaだけに限定して次を実行します。
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Dopa.app
+open /Applications/Dopa.app
+```
+
+Releaseの単体CLI archiveも同じ署名方針です。SHA-256を確認した後、展開したCLIが
+quarantineで停止された場合は、その2ファイルだけを指定します。
+
+```sh
+xattr -d com.apple.quarantine ./dopa ./dopa-daemon
+```
+
+`/Applications/*` のようなワイルドカードは使用しないでください。この操作はDopaに対する
+macOSのquarantine（マルウェア確認）を解除します。利用者向けのHomebrew Caskが自動で解除する
+ことはありません。リリースCIだけが検証のために同じ明示操作を行います。Dopaを更新した後は、
+macOSから再度許可を求められる場合があります。
 
 ## 🚀 使い方
 

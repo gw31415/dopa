@@ -34,7 +34,7 @@ version=$1
 sha256=$2
 output=${3:-}
 
-[[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+[[ "${version}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] \
   || die "invalid release version: ${version}"
 [[ "${sha256}" =~ ^[0-9a-f]{64}$ ]] || die "APP_SHA256 must be 64 lowercase hex characters"
 [[ -f "${CONFIG_PATH}" ]] || die "missing ${CONFIG_PATH}"
