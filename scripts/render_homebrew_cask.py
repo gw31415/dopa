@@ -75,11 +75,12 @@ for entry in cli_archive_files:
 
 completion_paths = []
 # Cask/StanzaOrder requires repeated completion artifacts to remain grouped by
-# stanza type instead of alternating bash, fish, and zsh for each executable.
+# stanza type, in its bash, zsh, fish order, instead of alternating shells for
+# each executable.
 for shell, extension in (
     ("bash", "bash"),
-    ("fish", "fish"),
     ("zsh", "zsh"),
+    ("fish", "fish"),
 ):
     for name, _ in cli_products:
         archive_path = f"completions/{name}.{extension}"
