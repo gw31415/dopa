@@ -578,6 +578,18 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
     preparePopoverFocus(in: window)
   }
 
+  /// A transient popover closes itself on any mouse-down outside its window,
+  /// including the one on the status item. The status item acts on mouse-up,
+  /// so it would then find the popover already closed and reopen it: the icon
+  /// could only ever show the panel. Keep the popover open through that
+  /// mouse-down so the mouse-up action sees it shown and closes it (toggle).
+  func popoverShouldClose(_ popover: NSPopover) -> Bool {
+    guard let event = NSApp.currentEvent, event.type == .leftMouseDown,
+      let statusWindow = statusItem?.button?.window
+    else { return true }
+    return event.window !== statusWindow
+  }
+
   func popoverDidClose(_ notification: Notification) {
     Self.model?.setPresentationActive(false)
   }
