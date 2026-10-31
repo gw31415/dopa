@@ -229,7 +229,7 @@ subscribe / unsubscribe は冪等。unsubscribe 応答後は新しい status.cha
 
 ## SwiftUIメニューバーアプリ
 
-公開AppKitの `NSStatusItem` と `NSPopover` で操作パネルだけを持ち、WindowGroupなどのメインウィンドウは設けない。通常クリックでパネル、右クリックでアプリ終了メニューを開く。バンドルの `LSUIElement` を有効にし、Bundle Identifierは `dev.amas.dopa` とする。タブ、ボタン、入力、Toggle、popover、confirmationDialogは標準SwiftUIを使い、Liquid Glassの形状・配色・アクセシビリティ設定をOSに任せる。Webデモの色や寸法はコピーしない。操作仕様と配置の不変条件は `docs/ui-concept.md` を参照する。
+公開AppKitの `NSStatusItem` と `NSPopover` で操作パネルだけを持ち、WindowGroupなどのメインウィンドウは設けない。通常クリックでパネルを開閉し、右クリックでアプリ終了メニューを開く。パネルは他アプリのクリック・アプリの非アクティブ化・Escで閉じる。バンドルの `LSUIElement` を有効にし、Bundle Identifierは `dev.amas.dopa` とする。タブ、ボタン、入力、Toggle、popover、confirmationDialogは標準SwiftUIを使い、Liquid Glassの形状・配色・アクセシビリティ設定をOSに任せる。Webデモの色や寸法はコピーしない。操作仕様と配置の不変条件は `docs/ui-concept.md` を参照する。
 
 両タブはこのアプリの操作に必要な共通サイズを使用し、一覧だけスクロールする。時間と終了時刻は同じ列・同じ入力サイズを使用する。無制限や日付表示、適用操作の切り替えでフォームやパネルを移動させない。フォームの実測高を状態へ書き戻さず、同じ自然サイズの領域を両タブで共有する。popoverの寸法は表示前に決定し、表示中にpreferredContentSizeを自動追従させない。メニューバー項目は固定幅とし、標準シンボルは自然サイズのまま使う。popoverは画像由来の高さが変わるボタンではなく、status windowの固定content領域へ位置を合わせる。接続案内・操作メッセージ・処理中は既存ヘッダーに収め、下部に可変の行を足さない。メッセージの詳細はヘッダー、入力エラーは該当欄のpopoverに表示する。全体管理の各行ではdaemonが管理するkeepDisplayOnのオン／オフだけを閲覧する。閉蓋監視は各クライアントのローカル設定であり、daemon snapshotや全体一覧へ含めない。全体のディスプレイオフ防止は接続中の整合したconfirmed.keepDisplayOnから判断し、有効時だけヘッダーへ短い表示を出す。自分の未適用設定や一部の要求だけから有効と判断しない。
 

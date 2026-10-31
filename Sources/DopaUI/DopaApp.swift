@@ -85,6 +85,8 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
   private var popover: NSPopover?
   var hasPopover: Bool { popover != nil }
   private var popoverInitialFocusView: PopoverInitialFocusView?
+  private var popoverOutsideClickMonitor: Any?
+  private var popoverResignObserver: (any NSObjectProtocol)?
   private let daemonInstaller = DaemonInstaller()
   private var daemonManagementPromptActive = false
   private var daemonManagementAlert: NSAlert?
@@ -229,9 +231,12 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
   func ensurePopover(for model: AppModel) -> NSPopover {
     if let popover { return popover }
     let popover = NSPopover()
-    popover.behavior = .transient
+    // Dismissal is handled by installPopoverDismissMonitors so that clicking
+    // the status item can toggle the popover.
+    popover.behavior = .applicationDefined
     popover.animates = false
     let contentController = PanelHostingController(rootView: DopaPanelHost(model: model, clearFocus: { [weak self] in self?.clearTimeFieldFocus() }))
+    contentController.onCancel = { [weak popover] in popover?.performClose(nil) }
     contentController.prepareSize()
 
     // A popover becomes key so that an intentional click, Tab, or keyboard
@@ -578,20 +583,41 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
     preparePopoverFocus(in: window)
   }
 
-  /// A transient popover closes itself on any mouse-down outside its window,
-  /// including the one on the status item. The status item acts on mouse-up,
-  /// so it would then find the popover already closed and reopen it: the icon
-  /// could only ever show the panel. Keep the popover open through that
-  /// mouse-down so the mouse-up action sees it shown and closes it (toggle).
-  func popoverShouldClose(_ popover: NSPopover) -> Bool {
-    guard let event = NSApp.currentEvent, event.type == .leftMouseDown,
-      let statusWindow = statusItem?.button?.window
-    else { return true }
-    return event.window !== statusWindow
+  func popoverDidShow(_ notification: Notification) {
+    installPopoverDismissMonitors()
   }
 
   func popoverDidClose(_ notification: Notification) {
+    removePopoverDismissMonitors()
     Self.model?.setPresentationActive(false)
+  }
+
+  /// The popover uses `.applicationDefined` behavior and is dismissed here
+  /// instead of by AppKit's transient handling. A transient popover closes on
+  /// the mouse-down over the status item, before the status item's action
+  /// runs, so that action always found the popover hidden and reopened it.
+  /// Owning dismissal keeps the popover open through clicks in this app's own
+  /// windows (the status item, the panel and its child popovers), which lets
+  /// the status item action toggle it reliably.
+  private func installPopoverDismissMonitors() {
+    removePopoverDismissMonitors()
+    popoverOutsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
+      matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+    ) { [weak self] _ in
+      MainActor.assumeIsolated { self?.popover?.performClose(nil) }
+    }
+    popoverResignObserver = NotificationCenter.default.addObserver(
+      forName: NSApplication.didResignActiveNotification, object: NSApp, queue: .main
+    ) { [weak self] _ in
+      MainActor.assumeIsolated { self?.popover?.performClose(nil) }
+    }
+  }
+
+  private func removePopoverDismissMonitors() {
+    if let popoverOutsideClickMonitor { NSEvent.removeMonitor(popoverOutsideClickMonitor) }
+    popoverOutsideClickMonitor = nil
+    if let popoverResignObserver { NotificationCenter.default.removeObserver(popoverResignObserver) }
+    popoverResignObserver = nil
   }
 
   private func clearTimeFieldFocus() {
