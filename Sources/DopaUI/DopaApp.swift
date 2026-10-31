@@ -22,6 +22,7 @@ enum DopaEntryPoint {
 struct DopaApp: App {
   @NSApplicationDelegateAdaptor(DopaAppDelegate.self) private var delegate
   @State private var model: AppModel
+  @State private var idleScreenSaver: IdleScreenSaverController
 
   init() {
     #if DOPA_UI_TESTING
@@ -44,6 +45,9 @@ struct DopaApp: App {
     _model = State(initialValue: model)
     DopaAppDelegate.model = model
     model.startMonitoring()
+    let idleScreenSaver = IdleScreenSaverController(model: model)
+    _idleScreenSaver = State(initialValue: idleScreenSaver)
+    idleScreenSaver.start()
   }
 
   var body: some Scene {

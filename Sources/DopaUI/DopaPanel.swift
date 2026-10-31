@@ -141,6 +141,7 @@ private struct OwnSessionView: View {
   @State private var dismissedError: String?
   @ScaledMetric(relativeTo: .body) private var inputWidth = 220
   @ScaledMetric(relativeTo: .body) private var actionHeight = 28
+  @AppStorage(IdleScreenSaverPolicy.defaultsKey) private var screenSaverDelay = 0
 
   private var target: Date? { model.schedule.proposedTarget(now: model.now) ?? model.schedule.target(now: model.now) }
   private var unlimited: Bool { model.schedule.proposedIsUnlimited }
@@ -231,6 +232,21 @@ private struct OwnSessionView: View {
           }
           Divider()
           LabeledContent {
+            Picker("スクリーンセーバー", selection: $screenSaverDelay) {
+              ForEach(IdleScreenSaverPolicy.delayChoices, id: \.self) { seconds in
+                Text(screenSaverDelayLabel(seconds)).tag(seconds)
+              }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .fixedSize()
+            .accessibilityIdentifier("idle-screen-saver")
+          } label: {
+            Text("スクリーンセーバー").frame(maxWidth: .infinity, alignment: .leading)
+          }
+          .help("ディスプレイオフ防止中はmacOSがスクリーンセーバーを開始しないため、操作がない状態が続いたらDopaが代わりに開始します")
+          Divider()
+          LabeledContent {
             Toggle("ふたを閉じたら停止", isOn: Binding(
               get: { model.options.stopOnLidClose },
               set: { value in
@@ -252,6 +268,14 @@ private struct OwnSessionView: View {
     .onChange(of: errorText) { _, _ in updateError() }
     .onChange(of: model.schedule.running) { _, running in
       if !running { finishEditing() }
+    }
+  }
+
+  private func screenSaverDelayLabel(_ seconds: Int) -> String {
+    switch seconds {
+    case ..<1: "開始しない"
+    case 3600...: "\(seconds / 3600)時間後に開始"
+    default: "\(seconds / 60)分後に開始"
     }
   }
 
