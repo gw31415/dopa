@@ -317,6 +317,30 @@ final class AppModelTests: XCTestCase {
       "changing the client-only lid policy must not update the daemon session")
   }
 
+  func testRelaunchedModelAcquiresWithPreviouslyChosenOptions() async throws {
+    let suite = "AppModelTests.\(UUID().uuidString)"
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let idle = modelSnapshotJSON(phase: "idle")
+    let handshake = DaemonHandshake(capabilities: [], snapshot: try DaemonSnapshot(idle))
+
+    let previous = AppModel(
+      transport: MockDaemonTransport(handshake: handshake, statusValue: idle),
+      lidState: MockLidState(), preferences: defaults)
+    try await previous.connectOnce()
+    await previous.setOptions(SessionOptions(keepDisplayOn: true, stopOnLidClose: true))
+
+    let transport = MockDaemonTransport(handshake: handshake, statusValue: idle)
+    let relaunched = AppModel(transport: transport, lidState: MockLidState(), preferences: defaults)
+    XCTAssertEqual(relaunched.options, SessionOptions(keepDisplayOn: true, stopOnLidClose: true))
+    try await relaunched.connectOnce()
+    await relaunched.start()
+
+    let requests = await transport.recordedRequests()
+    let acquire = try XCTUnwrap(requests.first { $0.method == "session.acquire" })
+    XCTAssertEqual(acquire.params["options"], .object(["keepDisplayOn": .bool(true)]))
+  }
+
   func testClosedLidPreventsStartWithoutAcquiring() async throws {
     let idle = modelSnapshotJSON(phase: "idle")
     let transport = MockDaemonTransport(

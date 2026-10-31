@@ -39,7 +39,7 @@ struct DopaApp: App {
       lidState: FixtureLidState(path: arguments[lidIndex + 1]),
       authorize: { ManagementCredential(externalForm: Data(repeating: 0xAB, count: 32).base64EncodedString()) })
     #else
-    let model = AppModel()
+    let model = AppModel(preferences: .standard)
     #endif
     _model = State(initialValue: model)
     DopaAppDelegate.model = model

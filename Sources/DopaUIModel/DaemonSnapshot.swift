@@ -11,6 +11,20 @@ public struct SessionOptions: Equatable, Sendable {
   public var daemonJSON: JSONValue {
     .object(["keepDisplayOn": .bool(keepDisplayOn)])
   }
+
+  static let keepDisplayOnKey = "keepDisplayOn"
+  static let stopOnLidCloseKey = "stopOnLidClose"
+
+  public init(loadingFrom defaults: UserDefaults) {
+    self.init(
+      keepDisplayOn: defaults.bool(forKey: Self.keepDisplayOnKey),
+      stopOnLidClose: defaults.bool(forKey: Self.stopOnLidCloseKey))
+  }
+
+  func save(to defaults: UserDefaults?) {
+    defaults?.set(keepDisplayOn, forKey: Self.keepDisplayOnKey)
+    defaults?.set(stopOnLidClose, forKey: Self.stopOnLidCloseKey)
+  }
 }
 
 public struct DaemonSessionOptions: Equatable, Sendable {

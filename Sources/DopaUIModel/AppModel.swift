@@ -15,7 +15,9 @@ public final class AppModel {
   public private(set) var capabilities: Set<String> = []
   public private(set) var ownSessionID: String?
   public private(set) var schedule = Schedule()
-  public private(set) var options = SessionOptions()
+  public private(set) var options = SessionOptions() {
+    didSet { if options != oldValue { options.save(to: preferences) } }
+  }
   public private(set) var busy = false
   public private(set) var authorizing = false
   public private(set) var cleanupUnconfirmed = false
@@ -24,6 +26,7 @@ public final class AppModel {
 
   @ObservationIgnored private let transport: any DaemonTransport
   @ObservationIgnored private let lidState: any LidStateReading
+  @ObservationIgnored private let preferences: UserDefaults?
   public let currentUID: UInt32
   @ObservationIgnored private let authorize: @Sendable () async throws -> ManagementCredential
   @ObservationIgnored private var monitoring: Task<Void, Never>?
@@ -43,10 +46,15 @@ public final class AppModel {
     transport: any DaemonTransport = SocketTransport(),
     lidState: any LidStateReading = NativeLidState(),
     authorize: @escaping @Sendable () async throws -> ManagementCredential = { try await .request() },
-    currentUID: UInt32 = geteuid()
+    currentUID: UInt32 = geteuid(),
+    preferences: UserDefaults? = nil
   ) {
     self.transport = transport
     self.lidState = lidState
+    self.preferences = preferences
+    // A relaunch must not silently start the next session without the
+    // display option the user chose last time.
+    if let preferences { options = SessionOptions(loadingFrom: preferences) }
     self.authorize = authorize
     self.currentUID = currentUID
   }
