@@ -2,7 +2,11 @@ import AppKit
 import DopaLid
 import DopaUIModel
 import Observation
+import OSLog
 import SwiftUI
+
+/// `log show --predicate 'subsystem == "dev.amas.dopa" && category == "panel"'`
+let panelLog = Logger(subsystem: "dev.amas.dopa", category: "panel")
 
 @main
 @MainActor
@@ -87,6 +91,9 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
   private var popoverInitialFocusView: PopoverInitialFocusView?
   private var popoverOutsideClickMonitor: Any?
   private var popoverResignObserver: (any NSObjectProtocol)?
+  /// Uptime of the last outside click or deactivation that closed the panel,
+  /// so the mouse-up of that same click on the status item does not reopen it.
+  private var lastOutsideClickClose: TimeInterval?
   private let daemonInstaller = DaemonInstaller()
   private var daemonManagementPromptActive = false
   private var daemonManagementAlert: NSAlert?
@@ -236,7 +243,7 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
     popover.behavior = .applicationDefined
     popover.animates = false
     let contentController = PanelHostingController(rootView: DopaPanelHost(model: model, clearFocus: { [weak self] in self?.clearTimeFieldFocus() }))
-    contentController.onCancel = { [weak popover] in popover?.performClose(nil) }
+    contentController.onCancel = { [weak self] in self?.closePanel(reason: "escape") }
     contentController.prepareSize()
 
     // A popover becomes key so that an intentional click, Tab, or keyboard
@@ -306,8 +313,12 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
 
   @objc private func statusItemAction(_ sender: NSStatusBarButton) {
     refreshDaemonInstallationState()
-    if NSApp.currentEvent?.type == .rightMouseUp {
-      popover?.performClose(nil)
+    let event = NSApp.currentEvent
+    let eventType = event.map { String(describing: $0.type) } ?? "nil"
+    let wasShown = popover?.isShown ?? false
+    panelLog.notice("status item action: event=\(eventType, privacy: .public) isShown=\(wasShown, privacy: .public)")
+    if event?.type == .rightMouseUp {
+      closePanel(reason: "right click")
       if let event = NSApp.currentEvent {
         NSMenu.popUpContextMenu(quitMenu, with: event, for: sender)
       } else {
@@ -321,21 +332,32 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
     }
 
     if let action = daemonManagementActionFromStatusItem {
-      popover?.performClose(nil)
+      panelLog.notice("status item action: daemon management prompt")
+      closePanel(reason: "daemon management")
       _ = offerDaemonManagement(action)
       return
     }
 
     guard let button = statusItem?.button, let model = Self.model else { return }
     let popover = ensurePopover(for: model)
+    let closedByThisClick = lastOutsideClickClose.map { closedAt in
+      (event?.timestamp ?? ProcessInfo.processInfo.systemUptime) - closedAt < 0.5
+    } ?? false
+    lastOutsideClickClose = nil
     if popover.isShown {
-      popover.performClose(sender)
+      closePanel(reason: "status item")
+    } else if closedByThisClick {
+      // Fallback for when the status item's frame could not be matched: the
+      // mouse-down of this same click already closed the panel as an outside
+      // click, so do not reopen it.
+      panelLog.notice("panel was closed by this click's mouse-down; not reopening")
     } else {
       NSApp.activate(ignoringOtherApps: true)
       if let controller = popover.contentViewController as? PanelHostingController<DopaPanelHost> {
         popover.contentSize = controller.prepareSize()
       }
       popover.show(relativeToStatusButton: button)
+      panelLog.notice("status item opened panel: isShown=\(popover.isShown, privacy: .public)")
       if let window = popover.contentViewController?.view.window {
         preparePopoverFocus(in: window)
         window.makeKey()
@@ -584,10 +606,12 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
   }
 
   func popoverDidShow(_ notification: Notification) {
+    panelLog.notice("popover did show")
     installPopoverDismissMonitors()
   }
 
   func popoverDidClose(_ notification: Notification) {
+    panelLog.notice("popover did close")
     removePopoverDismissMonitors()
     Self.model?.setPresentationActive(false)
   }
@@ -603,14 +627,49 @@ final class DopaAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate 
     removePopoverDismissMonitors()
     popoverOutsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
       matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-    ) { [weak self] _ in
-      MainActor.assumeIsolated { self?.popover?.performClose(nil) }
+    ) { [weak self] event in
+      MainActor.assumeIsolated {
+        guard let self else { return }
+        let location = NSEvent.mouseLocation
+        let frame = self.statusButtonScreenFrame
+        panelLog.notice("outside mouse-down: location=\(String(describing: location), privacy: .public) statusItemFrame=\(String(describing: frame), privacy: .public)")
+        if frame?.contains(location) == true {
+          // The status item can be hosted outside this process, so a click
+          // on it arrives here as another app's click. Leave the panel open
+          // and let statusItemAction close it on mouse-up.
+          panelLog.notice("outside click is on the status item; ignoring")
+          return
+        }
+        self.closePanel(reason: "click in another app")
+        if event.type == .leftMouseDown { self.lastOutsideClickClose = event.timestamp }
+      }
     }
     popoverResignObserver = NotificationCenter.default.addObserver(
       forName: NSApplication.didResignActiveNotification, object: NSApp, queue: .main
     ) { [weak self] _ in
-      MainActor.assumeIsolated { self?.popover?.performClose(nil) }
+      MainActor.assumeIsolated {
+        guard let self, self.popover?.isShown == true else { return }
+        self.closePanel(reason: "app resigned active")
+        self.lastOutsideClickClose = ProcessInfo.processInfo.systemUptime
+      }
     }
+  }
+
+  /// Closes the panel and its dismissal monitors in one place.
+  private func closePanel(reason: String) {
+    guard let popover, popover.isShown else { return }
+    panelLog.notice("closing panel: reason=\(reason, privacy: .public)")
+    popover.close()
+    // `close()` skips the delegate's should-close check; make the
+    // did-close cleanup unconditional so monitors never outlive the panel.
+    removePopoverDismissMonitors()
+    Self.model?.setPresentationActive(false)
+    panelLog.notice("closed panel: isShown=\(popover.isShown, privacy: .public)")
+  }
+
+  private var statusButtonScreenFrame: NSRect? {
+    guard let button = statusItem?.button, let window = button.window else { return nil }
+    return window.convertToScreen(button.convert(button.bounds, to: nil))
   }
 
   private func removePopoverDismissMonitors() {
