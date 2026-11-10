@@ -244,7 +244,7 @@ private struct OwnSessionView: View {
           } label: {
             Text("スクリーンセーバー").frame(maxWidth: .infinity, alignment: .leading)
           }
-          .help("ディスプレイオフ防止中はmacOSがスクリーンセーバーを開始しないため、操作がない状態が続いたらDopaが代わりに開始します")
+          .help("ディスプレイオフ防止中はmacOSがスクリーンセーバーを開始しないため、操作がない状態が続いたらDopaが画面を暗くして時計を表示します。操作すればロックなしで戻ります")
           Divider()
           LabeledContent {
             Toggle("ふたを閉じたら停止", isOn: Binding(

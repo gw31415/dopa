@@ -3,9 +3,13 @@ import CoreGraphics
 import DopaUIModel
 import Observation
 
-/// Starts the macOS screen saver after a period without input while Dopa keeps
+/// Shows Dopa's screen saver after a period without input while Dopa keeps
 /// the display on. A display-sleep assertion also keeps macOS from starting
-/// the screen saver itself, so this restores it as an opt-in.
+/// its screen saver, so this restores one as an opt-in.
+///
+/// It deliberately does not start the macOS screen saver: that one begins the
+/// system's "require password after the screen saver begins" countdown and
+/// locks the Mac that the user asked Dopa to keep available.
 ///
 /// The controller never polls on a fixed cadence: it sleeps until the
 /// earliest moment the idle delay could elapse, and it does nothing while the
@@ -13,12 +17,9 @@ import Observation
 @available(macOS 14.0, *)
 @MainActor
 final class IdleScreenSaverController {
-  private static let engineURL = URL(
-    fileURLWithPath: "/System/Library/CoreServices/ScreenSaverEngine.app")
-  private static let engineBundleID = "com.apple.ScreenSaver.Engine"
-
   private let model: AppModel
   private let defaults: UserDefaults
+  private let presenter = IdleScreenSaverPresenter()
   private var policy: IdleScreenSaverPolicy
   private var task: Task<Void, Never>?
   private var defaultsObserver: NSObjectProtocol?
@@ -78,11 +79,13 @@ final class IdleScreenSaverController {
       displaySleepPrevented: model.displaySleepPrevented == true)
     switch decision {
     case .inactive:
+      // Once the display may sleep again, macOS takes over idle handling.
+      presenter.dismiss()
       return nil
     case .wait(let seconds):
       return seconds
     case .launch(let nextCheck):
-      launchScreenSaver()
+      if Self.sessionIsInteractive() { presenter.present() }
       return nextCheck
     }
   }
@@ -91,22 +94,6 @@ final class IdleScreenSaverController {
     // ~0 is kCGAnyInputEventType, which Swift does not import by name.
     guard let anyInput = CGEventType(rawValue: ~0) else { return 0 }
     return CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: anyInput)
-  }
-
-  private func launchScreenSaver() {
-    guard Self.sessionIsInteractive() else { return }
-    let running = NSWorkspace.shared.runningApplications.contains {
-      $0.bundleIdentifier == Self.engineBundleID
-    }
-    guard !running else { return }
-    let configuration = NSWorkspace.OpenConfiguration()
-    configuration.addsToRecentItems = false
-    NSWorkspace.shared.openApplication(at: Self.engineURL, configuration: configuration) {
-      _, error in
-      if let error {
-        NSLog("Dopa: cannot start the screen saver: %@", String(describing: error))
-      }
-    }
   }
 
   /// A locked screen or a session switched away from the console must not
