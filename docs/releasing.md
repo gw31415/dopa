@@ -2,16 +2,21 @@
 
 ## 初回設定
 
-公開する macOS app はApple Developer Programを必要としないad-hoc署名とhardened runtime
-で配布し、notarizationは行いません。Apple Silicon上のコード署名構造は保ちますが、Appleによる
-開発元・マルウェア検証済みという意味は持ちません。通常のquarantineを意図的に残し、
-利用者自身が対象を確認してから実行を許可する設計です。
+公開する macOS app はDeveloper ID（team `P5X9736J6B`）で署名し、hardened runtimeを有効にして
+Appleの公証を受けます。署名の秘密情報（Developer ID証明書と公証用のApp Store Connect APIキー）は
+このリポジトリには置かず、`gw31415/homebrew-tap` の environment `apple-signing` にだけ置きます。
+release workflowの `sign` jobはtapの再利用workflow `sign.yml` を呼び、未署名（ad-hoc）の
+`Dopa.app` をtapの `notarize.yml` に渡します。tapは依頼元のrunが `notarize/dopa/profile.sh`
+の条件（このリポジトリの `release.yml`、`release` event、`vX.Y.Z` tag）に合うことを確かめてから、
+`Contents/Helpers/dopa`、`Contents/Helpers/dopa-daemon`、`Dopa.app` の順に署名し、公証して
+stapleします。tapがこのリポジトリのartifactを読むためのtokenは
+`.github/chainguard/homebrew-tap-notarize.sts.yaml`（`actions: read` のみ）がOcto STSで許可します。
 
 Homebrew tapへのPRは、GitHub ActionsのOIDC identityを
 [Octo STS](https://github.com/octo-sts/app)で短命なGitHub App installation tokenへ
 交換して作成します。PAT、deploy key、Actions secretは使いません。Octo STS GitHub Appは
-Repository accessを `Only select repositories` とし、`gw31415/homebrew-tap` だけに
-installします。Appのinstall時には広いpermission一覧が表示されますが、release workflowへ
+Repository accessを `Only select repositories` とし、`gw31415/homebrew-tap` と
+`gw31415/dopa` にinstallします（dopa側はtapの署名workflowがartifactを読むため）。Appのinstall時には広いpermission一覧が表示されますが、release workflowへ
 発行できるtokenはtap側の `.github/chainguard/dopa-release.sts.yaml` が指定した次の3権限に
 限定します。
 
@@ -20,7 +25,7 @@ installします。Appのinstall時には広いpermission一覧が表示され�
 - Commit statuses: Read and write
 
 `dopa`には `homebrew-release` environmentを作成し、deployment branches and tagsを
-`v*` tagだけに制限します。tap側ではGitHub Actionsを無効化し、workflowを置きません。
+`v*` tagだけに制限します。tap側で動くGitHub Actionsは署名と公証のworkflowだけです。
 `main`はPR、1件の人間によるapproval、`dopa/release-verified` statusを必須にし、
 Octo STS Appを保護ルールのbypass対象にしません。個人repositoryの所有者は初回設定と
 手動保守のbreak-glassとしてadmin bypassを保持しますが、通常のreleaseでは使いません。
@@ -28,7 +33,7 @@ Octo STS Appを保護ルールのbypass対象にしません。個人repository�
 stable releaseでは、`id-token`権限を持たないjobでCaskの実インストール検証を完了します。
 その後、新しいrunnerのpublication jobが検証済みCask本文とSHA-256だけを受け取り、OIDC tokenを
 取得してtapのautomation branch、検証status、pull requestの作成に使います。このjobはsourceを
-checkoutせず、release asset、tap script、配布binaryを実行しません。prereleaseもad-hoc署名した
+checkoutせず、release asset、tap script、配布binaryを実行しません。prereleaseも署名・公証した
 配布assetの添付までは行いますが、Homebrew tapは更新しません。
 app の version 規約を保つため、prerelease の場合も tag 自体は接尾辞のない `vX.Y.Z`
 形式にします。GitHubはstable releaseの初回公開時に `published` と `released` の両方を送るため、
@@ -48,15 +53,15 @@ workflowは重複を避けて `published` だけを購読します。prerelease�
    比較する必要はありません。auto-mergeが予約されているため、approval後にmergeされます。
 
 workflow は tag の source をもう一度テスト・ビルドし、配布物を生成して Release に
-添付します。appと同梱executableはすべてad-hoc署名かつhardened runtimeであることを検証します。stable release
-では生成したCaskをmacOS 26 runnerへ通常インストールし、Caskに未notarizedである旨と
-明示的な許可手順が含まれることを確認します。その後、利用者向けに記載したものと同じ
-`xattr -dr com.apple.quarantine /Applications/Dopa.app` を対象appだけに実行し、アプリの
+添付します。appと同梱executableはすべてDeveloper ID署名かつhardened runtimeで、appに公証の
+ticketがstapleされていることを検証します。stable releaseでは生成したCaskをmacOS 26 runnerへ
+通常インストールし、quarantineが付いたままGatekeeperが公証済みとして受け入れることを確認します。
+その後、初回起動の確認ダイアログに答えられないため対象appだけのquarantineを解除し、アプリの
 起動、inventoryに登録されたすべてのCLI、アンインストールを確認してからtapのpull request
-を作成します。workflowやCaskがquarantineを暗黙に解除することはありません。
+を作成します。Caskがquarantineを解除することはありません。
 
 失敗時は同じworkflowを再実行できます。完全に公開済みのasset setは上書きせず、manifest、
-checksum、version、ad-hoc署名を再検証してそのまま使います。途中で止まったuploadだけは
+checksum、version、Developer ID署名と公証を再検証してそのまま使います。途中で止まったuploadだけは
 一時markerを手掛かりに全体を再生成できるため、Caskが参照したassetのchecksumは変わりません。
 tap更新jobはrelease assetの生成とは分離して直列化し、1本のautomation branchとPRを
 最新版へ更新します。tapのmainまたは未merge branchより古いCaskへの更新も拒否します。
@@ -71,8 +76,8 @@ statusはhead SHAに追従しないため、新しい内容の確認が必要で
 product はすべて、単体コマンドまたは app の構成要素としてこのファイルで分類する
 必要があります。パッケージ処理は `swift package dump-package` の結果と inventory を
 比較するため、新しい product を追加したのに配布定義を更新しなければ失敗します。
-`macOSDistribution` もこのinventoryに固定し、ad-hoc署名・hardened runtime・未notarizedという配布方針と
-実際のarchiveが異なる場合は公開を止めます。
+`macOSDistribution` もこのinventoryに固定し、Developer ID署名（team `P5X9736J6B`）・hardened runtime・
+公証済みという配布方針と実際のarchiveが異なる場合は公開を止めます。
 
 app、同梱 helper、追加ファイルについても inventory から archive と
 `release-manifest.json` を生成します。workflow は `dist/` に生成されたファイルを
@@ -85,7 +90,7 @@ workflow 側に別の添付リストを増やしてはいけません。
 - `dopa`: 単体でダウンロードできるCLI実行ファイル
 - `dopa-daemon`: 単体でダウンロードできるdaemon実行ファイル
 - `dopa-macos-arm64.tar.gz`: CLI、daemon、shell completion、利用時に必要な文書
-- `dopa.rb`: app archiveのSHA-256と全CLI・shell completion・未notarized警告を含むCask
+- `dopa.rb`: app archiveのSHA-256と全CLI・shell completionを含むCask
 - `release-manifest.json`: version、構成要素、archive の SHA-256
 - `SHA256SUMS`: 上記の検証用 checksum
 
