@@ -63,11 +63,12 @@ try:
 except (KeyError, TypeError) as error:
     fail(f"release inventory is missing {error}")
 if distribution != {
-    "signature": "ad-hoc",
+    "signature": "developer-id",
+    "teamIdentifier": "P5X9736J6B",
     "hardenedRuntime": True,
-    "notarized": False,
+    "notarized": True,
 }:
-    fail("release inventory must require ad-hoc signing, hardened runtime, and no notarization")
+    fail("release inventory must require Developer ID signing (team P5X9736J6B), hardened runtime, and notarization")
 
 try:
     cli_products = [product for product in products if product["classification"] == "cli"]
@@ -264,7 +265,7 @@ def run_checked(arguments: list[str], description: str) -> None:
         fail(f"{description} failed{detail}")
 
 
-def validate_ad_hoc_signature(path: Path, name: str) -> None:
+def validate_signature(path: Path, name: str) -> None:
     run_checked(["codesign", "--verify", "--strict", str(path)], f"signature verification for {name}")
     try:
         details = subprocess.check_output(
@@ -274,9 +275,12 @@ def validate_ad_hoc_signature(path: Path, name: str) -> None:
             timeout=30,
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-        fail(f"cannot inspect ad-hoc signature for {name}: {error}")
-    if "Signature=adhoc" not in details or "Authority=" in details:
-        fail(f"{name} must use an ad-hoc signature without a signing identity")
+        fail(f"cannot inspect the signature for {name}: {error}")
+    if (
+        "Authority=Developer ID Application:" not in details
+        or f"TeamIdentifier={distribution['teamIdentifier']}" not in details
+    ):
+        fail(f"{name} must be signed with the Developer ID of team {distribution['teamIdentifier']}")
     if not re.search(r"flags=0x[0-9a-f]+\([^)]*runtime[^)]*\)", details):
         fail(f"{name} does not enable the hardened runtime")
 
@@ -316,7 +320,8 @@ with tempfile.TemporaryDirectory(prefix="dopa-published-release.") as temporary_
         ["codesign", "--verify", "--deep", "--strict", str(app_bundle)],
         "app deep signature verification",
     )
-    validate_ad_hoc_signature(app_bundle, bundle_name)
+    validate_signature(app_bundle, bundle_name)
+    run_checked(["xcrun", "stapler", "validate", str(app_bundle)], f"notarization ticket of {app_bundle.name}")
     for product in products:
         product_path = app_bundle / PurePosixPath(product["bundlePath"])
         if not product_path.is_file() or product_path.is_symlink() or not os.access(product_path, os.X_OK):
@@ -332,7 +337,7 @@ with tempfile.TemporaryDirectory(prefix="dopa-published-release.") as temporary_
             fail(f"cannot inspect architecture for {product['name']}: {error}")
         if architectures != "arm64":
             fail(f"archived product is not thin arm64: {product['name']}")
-        validate_ad_hoc_signature(product_path, product["name"])
+        validate_signature(product_path, product["name"])
 
     cli_extract = temporary / "cli"
     cli_extract.mkdir()
@@ -377,12 +382,12 @@ with tempfile.TemporaryDirectory(prefix="dopa-published-release.") as temporary_
             fail(f"cannot inspect standalone CLI architecture for {product['name']}: {error}")
         if architectures != "arm64":
             fail(f"standalone CLI asset is not thin arm64: {product['name']}")
-        validate_ad_hoc_signature(standalone_product, f"standalone {product['name']}")
+        validate_signature(standalone_product, f"standalone {product['name']}")
         run_checked(
             [str(standalone_product), "--help"],
             f"standalone {product['name']} --help",
         )
-        validate_ad_hoc_signature(cli_product, f"CLI archive {product['name']}")
+        validate_signature(cli_product, f"CLI archive {product['name']}")
         run_checked(
             [str(cli_product), "--help"],
             f"CLI archive {product['name']} --help",

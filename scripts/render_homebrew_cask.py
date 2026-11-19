@@ -29,11 +29,12 @@ try:
 except (KeyError, TypeError) as error:
     fail(f"release inventory is missing {error}")
 if distribution != {
-    "signature": "ad-hoc",
+    "signature": "developer-id",
+    "teamIdentifier": "P5X9736J6B",
     "hardenedRuntime": True,
-    "notarized": False,
+    "notarized": True,
 }:
-    fail("macOSDistribution must be ad-hoc with hardened runtime and no notarization")
+    fail("macOSDistribution must be Developer ID signed (team P5X9736J6B) with hardened runtime and notarized")
 
 for value, suffix, description in (
     (bundle_name, ".app", "bundleName"),
@@ -123,20 +124,6 @@ for shell, archive_path, target in completion_paths:
         lines.append(f'  {shell}_completion "{source}", target: "{target}"')
 lines.extend(
     [
-        "",
-        "  caveats <<~EOS",
-        "    Dopa is ad-hoc signed without a Developer ID and is not notarized by Apple.",
-        "    macOS may block it after installation or upgrade.",
-        "",
-        "    After trying to open Dopa once, allow it in:",
-        "      System Settings > Privacy & Security > Open Anyway",
-        "",
-        "    Or, only if you trust this release, remove quarantine from Dopa alone:",
-        f'      xattr -dr com.apple.quarantine "#{{appdir}}/{bundle_name}"',
-        f'      open "#{{appdir}}/{bundle_name}"',
-        "",
-        "    Do not use a wildcard: removing quarantine bypasses Apple's malware check.",
-        "  EOS",
         "end",
         "",
     ]

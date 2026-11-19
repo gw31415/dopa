@@ -75,9 +75,9 @@ fi
 swift_build_args+=(--scratch-path "${SCRATCH_PATH}")
 
 # Apple Silicon executables still need a structurally valid code signature.
-# Use ad-hoc signing for both local and public builds: it needs no paid Apple
-# Developer identity. Hardened runtime remains available without an identity,
-# while macOS still requires explicit approval for a quarantined download.
+# Sign ad hoc here: it needs no Apple Developer identity, and hardened runtime
+# works without one. The release workflow has gw31415/homebrew-tap re-sign the
+# public build with the Developer ID and notarize it.
 CODESIGN_ARGS=(--force --sign - --options runtime)
 
 # Serialise each destination bundle for the whole build. Without this lock,

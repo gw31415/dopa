@@ -5,9 +5,10 @@
   "cliArchive": "dopa-macos-arm64.tar.gz",
   "homebrewCask": "dopa.rb",
   "macOSDistribution": {
-    "signature": "ad-hoc",
+    "signature": "developer-id",
+    "teamIdentifier": "P5X9736J6B",
     "hardenedRuntime": true,
-    "notarized": false
+    "notarized": true
   },
   "products": [
     {

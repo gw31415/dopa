@@ -13,17 +13,12 @@ defaults:
     shell: bash
 
 jobs:
-  publish-release-assets:
+  build:
     runs-on: macos-26
     permissions:
-      contents: write
-    concurrency:
-      group: dopa-release-assets-${{ github.event.release.tag_name }}
-      cancel-in-progress: false
+      contents: read
     outputs:
-      app-archive: ${{ steps.published-assets.outputs.app-archive }}
-      app-sha256: ${{ steps.published-assets.outputs.app-sha256 }}
-      bundle-name: ${{ steps.published-assets.outputs.bundle-name }}
+      reuse: ${{ steps.asset-preflight.outputs.reuse }}
     env:
       RELEASE_TAG: ${{ github.event.release.tag_name }}
       RELEASE_SHA: ${{ github.sha }}
@@ -111,6 +106,8 @@ jobs:
         run: |
           set -euo pipefail
           make check app
+          # The build is ad-hoc signed; gw31415/homebrew-tap replaces these
+          # signatures with the Developer ID and notarizes the app (job "sign").
           signed_items=(.build/Dopa.app)
           while IFS= read -r bundle_path; do
             signed_items+=(".build/Dopa.app/${bundle_path}")
@@ -129,17 +126,82 @@ jobs:
             fi
           done
 
-      - name: Package and verify release assets
+          ditto -c -k --keepParent .build/Dopa.app "${RUNNER_TEMP}/Dopa.app.zip"
+
+      - name: Keep the unsigned app for signing
         if: ${{ steps.asset-preflight.outputs.reuse != 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unsigned
+          path: ${{ runner.temp }}/Dopa.app.zip
+
+  # gw31415/homebrew-tap holds the Developer ID certificate and the notary key
+  # for all of the owner's apps (its notarize/dopa/ says what is signed). This
+  # job only asks it to sign, notarize and staple Dopa.app, and takes it back
+  # as the artifact "signed".
+  sign:
+    needs: build
+    if: ${{ needs.build.outputs.reuse != 'true' }}
+    permissions:
+      id-token: write
+    uses: gw31415/homebrew-tap/.github/workflows/sign.yml@main
+    with:
+      app: dopa
+      artifact: unsigned
+
+  publish-release-assets:
+    needs: [build, sign]
+    if: >-
+      ${{ !cancelled() && needs.build.result == 'success'
+      && (needs.sign.result == 'success' || needs.build.outputs.reuse == 'true') }}
+    runs-on: macos-26
+    permissions:
+      contents: write
+    concurrency:
+      group: dopa-release-assets-${{ github.event.release.tag_name }}
+      cancel-in-progress: false
+    outputs:
+      app-archive: ${{ steps.published-assets.outputs.app-archive }}
+      app-sha256: ${{ steps.published-assets.outputs.app-sha256 }}
+      bundle-name: ${{ steps.published-assets.outputs.bundle-name }}
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      RELEASE_SHA: ${{ github.sha }}
+    steps:
+      - name: Check out the released source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the locked toolchain
+        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+        with:
+          install: true
+          cache: true
+
+      - name: Take the signed and notarized app
+        if: ${{ needs.build.outputs.reuse != 'true' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed
+          path: ${{ runner.temp }}/signed
+
+      - name: Package and verify release assets
+        if: ${{ needs.build.outputs.reuse != 'true' }}
         run: |
           set -euo pipefail
+          rm -rf .build/Dopa.app
+          mkdir -p .build
+          ditto -x -k "${RUNNER_TEMP}/signed/Dopa.app.zip" .build
           ./scripts/package-release.sh "${RELEASE_TAG}"
 
       - name: Publish or reuse the complete verified asset set
         id: published-assets
         env:
           GH_TOKEN: ${{ github.token }}
-          ASSETS_REUSABLE: ${{ steps.asset-preflight.outputs.reuse }}
+          ASSETS_REUSABLE: ${{ needs.build.outputs.reuse }}
         run: |
           set -euo pipefail
           app_archive=$(mise exec -- python -c \
@@ -330,13 +392,6 @@ jobs:
           ./scripts/render-homebrew-cask.sh \
             "${version}" "${APP_SHA256}" homebrew-tap/Casks/dopa.rb
           ruby -c homebrew-tap/Casks/dopa.rb
-          grep -F 'Dopa is ad-hoc signed without a Developer ID and is not notarized by Apple.' \
-            homebrew-tap/Casks/dopa.rb
-          grep -F 'System Settings > Privacy & Security > Open Anyway' \
-            homebrew-tap/Casks/dopa.rb
-          grep -F 'xattr -dr com.apple.quarantine "#{appdir}/Dopa.app"' \
-            homebrew-tap/Casks/dopa.rb
-          grep -F "Do not use a wildcard" homebrew-tap/Casks/dopa.rb
           if grep -Eq '^[[:space:]]*(no_)?quarantine([[:space:]]|$)' \
             homebrew-tap/Casks/dopa.rb; then
             echo "::error::The Cask must not disable or remove quarantine"
@@ -376,11 +431,6 @@ jobs:
           install_log="${RUNNER_TEMP}/dopa-brew-install.log"
           brew install --cask gw31415/tap/dopa 2>&1 | tee "${install_log}"
           cask_installed=true
-          grep -F 'Dopa is ad-hoc signed without a Developer ID and is not notarized by Apple.' \
-            "${install_log}"
-          grep -F 'System Settings > Privacy & Security > Open Anyway' "${install_log}"
-          grep -F 'xattr -dr com.apple.quarantine "/Applications/Dopa.app"' "${install_log}"
-          grep -F 'Do not use a wildcard' "${install_log}"
 
           test -d "${installed_app}"
           quarantine=$(xattr -p com.apple.quarantine "${installed_app}" 2>/dev/null || true)
@@ -389,31 +439,37 @@ jobs:
             exit 1
           }
 
-          signature=$(codesign -dvvv "${installed_app}" 2>&1)
-          grep -F 'Signature=adhoc' <<<"${signature}"
-          grep -E 'flags=.*\([^)]*runtime' <<<"${signature}"
-          if grep -Fq 'Authority=' <<<"${signature}"; then
-            echo "::error::${installed_app} unexpectedly uses a signing identity"
-            exit 1
+          check_signature() {
+            local signature
+            signature=$(codesign -dvvv "$1" 2>&1)
+            grep -F 'Authority=Developer ID Application:' <<<"${signature}"
+            grep -F 'TeamIdentifier=P5X9736J6B' <<<"${signature}"
+            grep -E 'flags=.*\([^)]*runtime' <<<"${signature}"
+          }
+          codesign --verify --deep --strict "${installed_app}"
+          check_signature "${installed_app}"
+          xcrun stapler validate "${installed_app}"
+          # Gatekeeper accepts the quarantined app as notarized. Some runner
+          # images turn assessments off; spctl then names no source.
+          if spctl --status | grep -q 'assessments enabled'; then
+            spctl --assess --type execute -vv "${installed_app}" 2>&1 \
+              | grep -F 'source=Notarized Developer ID'
+          else
+            echo "::warning::Gatekeeper is off on this runner; relying on stapler"
           fi
           while IFS= read -r product_path; do
             signed_item="${installed_app}/${product_path}"
             test -x "${signed_item}"
-            signature=$(codesign -dvvv "${signed_item}" 2>&1)
-            grep -F 'Signature=adhoc' <<<"${signature}"
-            grep -E 'flags=.*\([^)]*runtime' <<<"${signature}"
-            if grep -Fq 'Authority=' <<<"${signature}"; then
-              echo "::error::${signed_item} unexpectedly uses a signing identity"
-              exit 1
-            fi
+            check_signature "${signed_item}"
           done < <(mise exec -- python -c '
           import json
           products = json.load(open("release/artifacts.json"))["products"]
           print("\n".join(product["bundlePath"] for product in products))
           ')
 
-          # The public Cask leaves Gatekeeper quarantine intact. For execution
-          # testing, perform the same explicit, app-scoped opt-in documented to users.
+          # The public Cask leaves Gatekeeper quarantine intact. A notarized app
+          # still asks to confirm its first launch, which nobody can answer on
+          # a runner, so remove quarantine from Dopa.app alone to launch it.
           xattr -dr com.apple.quarantine "${installed_app}"
           if xattr -lr "${installed_app}" 2>/dev/null \
             | grep -Fq 'com.apple.quarantine:'; then
@@ -517,10 +573,6 @@ jobs:
 
           version=${RELEASE_TAG#v}
           grep -Fx "  version \"${version}\"" homebrew-tap/Casks/dopa.rb
-          grep -F 'Dopa is ad-hoc signed without a Developer ID and is not notarized by Apple.' \
-            homebrew-tap/Casks/dopa.rb
-          grep -F 'xattr -dr com.apple.quarantine "#{appdir}/Dopa.app"' \
-            homebrew-tap/Casks/dopa.rb
           if grep -Eq '^[[:space:]]*(no_)?quarantine([[:space:]]|$)' \
             homebrew-tap/Casks/dopa.rb; then
             echo "::error::The Cask must not disable or remove quarantine"
@@ -623,7 +675,7 @@ jobs:
           ## Dopa ${version}
 
           - Official release: https://github.com/gw31415/dopa/releases/tag/${RELEASE_TAG}
-          - macOS verification: the release workflow installed the Cask with quarantine intact, verified every inventoried executable was ad-hoc signed with hardened runtime and no signing identity, explicitly removed quarantine from Dopa.app only, launched the app, ran every inventoried CLI help command, and uninstalled the Cask successfully.
+          - macOS verification: the release workflow installed the Cask with quarantine intact, verified every inventoried executable was signed with the Developer ID (team P5X9736J6B) and hardened runtime, that the notarization ticket is stapled and Gatekeeper accepts the app as notarized, then removed quarantine from Dopa.app only, launched the app, ran every inventoried CLI help command, and uninstalled the Cask successfully.
           - The archive checksum is generated from the verified release asset.
 
           Generated automatically by gw31415/dopa release workflow.

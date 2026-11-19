@@ -88,11 +88,12 @@ if len({app_archive, cli_archive, homebrew_cask} | reserved_assets) != 5:
     fail("release asset names must be distinct and must not use reserved names")
 distribution = config["macOSDistribution"]
 if distribution != {
-    "signature": "ad-hoc",
+    "signature": "developer-id",
+    "teamIdentifier": "P5X9736J6B",
     "hardenedRuntime": True,
-    "notarized": False,
+    "notarized": True,
 }:
-    fail("macOSDistribution must require ad-hoc signing, hardened runtime, and no notarization")
+    fail("macOSDistribution must require Developer ID signing (team P5X9736J6B), hardened runtime, and notarization")
 
 products = config["products"]
 if not isinstance(products, list) or not products:
@@ -260,7 +261,7 @@ def run_checked(arguments: list[str], description: str) -> None:
         fail(f"{description} failed{detail}")
 
 
-def validate_ad_hoc_signature(path: Path, name: str) -> None:
+def validate_signature(path: Path, name: str) -> None:
     run_checked(["codesign", "--verify", "--strict", str(path)], f"codesign verification for {name}")
     try:
         details = subprocess.check_output(
@@ -270,9 +271,12 @@ def validate_ad_hoc_signature(path: Path, name: str) -> None:
             timeout=30,
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-        fail(f"cannot inspect ad-hoc signature for {name}: {error}")
-    if "Signature=adhoc" not in details or "Authority=" in details:
-        fail(f"{name} must use an ad-hoc signature without a signing identity")
+        fail(f"cannot inspect the signature for {name}: {error}")
+    if (
+        "Authority=Developer ID Application:" not in details
+        or f"TeamIdentifier={distribution['teamIdentifier']}" not in details
+    ):
+        fail(f"{name} must be signed with the Developer ID of team {distribution['teamIdentifier']}")
     if not re.search(r"flags=0x[0-9a-f]+\([^)]*runtime[^)]*\)", details):
         fail(f"{name} does not enable the hardened runtime")
 
@@ -291,7 +295,7 @@ def validate_binary(path: Path, name: str, run_help: bool) -> None:
         fail(f"cannot inspect architecture for {name}: {error}")
     if architectures != "arm64":
         fail(f"{name} must be a thin arm64 Mach-O, found: {architectures!r}")
-    validate_ad_hoc_signature(path, name)
+    validate_signature(path, name)
     if run_help:
         run_checked([str(path), "--help"], f"{name} --help")
 
@@ -300,7 +304,8 @@ run_checked(
     ["codesign", "--verify", "--deep", "--strict", str(app_bundle)],
     "app codesign verification",
 )
-validate_ad_hoc_signature(app_bundle, bundle_name)
+validate_signature(app_bundle, bundle_name)
+run_checked(["xcrun", "stapler", "validate", str(app_bundle)], f"notarization ticket of {app_bundle.name}")
 product_sources: dict[str, Path] = {}
 for product in normalized_products:
     source = app_bundle / PurePosixPath(product["bundlePath"])
@@ -512,7 +517,8 @@ run_checked(
     ["codesign", "--verify", "--deep", "--strict", str(extracted_app)],
     "archived app codesign verification",
 )
-validate_ad_hoc_signature(extracted_app, f"archived {bundle_name}")
+validate_signature(extracted_app, f"archived {bundle_name}")
+run_checked(["xcrun", "stapler", "validate", str(extracted_app)], f"notarization ticket of {extracted_app.name}")
 for product in normalized_products:
     extracted = extracted_app / PurePosixPath(product["bundlePath"])
     validate_binary(extracted, f"archived {product['name']}", False)
