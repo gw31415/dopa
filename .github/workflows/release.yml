@@ -414,6 +414,8 @@ jobs:
           # Homebrew clones this local repository, so commit the generated Cask
           # before tapping it. The branch is pushed only after every check passes.
           brew tap gw31415/tap "${GITHUB_WORKSPACE}/homebrew-tap"
+          # Homebrew 7 loads Casks only from taps the user has trusted.
+          brew trust --tap gw31415/tap
           (cd homebrew-tap && script/check)
           installed_app="/Applications/${BUNDLE_NAME}"
           cask_installed=false
